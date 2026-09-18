@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in `lorai`. Do not modify `morsik-lora` or `Baltic_Hackaton_26`.
+- Work only in `lcq`. Do not modify `morsik-lora` or `Baltic_Hackaton_26`.
 - No MQTT, HTTP server, Docker, LLM inference, cryptography or hardware in this milestone.
 - Positive-only endorsement; no “all clear” output.
 - Default Byzantine budget: 4000 basis points, i.e. 40% of members, rounded down to an integer number of members.
@@ -22,7 +22,7 @@
 
 ## Intended files and public interface
 
-Create `pyproject.toml`, `.python-version`, `.gitignore`, `uv.lock` (generated), `src/lorai/__init__.py`, `src/lorai/policy.py`, `tests/test_policy.py`, and `tests/test_policy_properties.py`. Modify `README.md` and `docs/HANDOFF.md` only to record actual usage/results.
+Create `pyproject.toml`, `.python-version`, `.gitignore`, `uv.lock` (generated), `src/lcq/__init__.py`, `src/lcq/policy.py`, `tests/test_policy.py`, and `tests/test_policy_properties.py`. Modify `README.md` and `docs/HANDOFF.md` only to record actual usage/results.
 
 `Policy(weights: Mapping[str, int], byzantine_bps: int = 4000, max_weight_ratio: int = 3)` exposes read-only weights, `size`, `max_faulty`, `min_signers`, `total_weight`.
 
@@ -33,11 +33,11 @@ Create `pyproject.toml`, `.python-version`, `.gitignore`, `uv.lock` (generated),
 **Files:** Create the package/configuration and `tests/test_policy.py`.
 
 - [ ] Check `git status --short --branch`, `python3 --version`, and `uv --version`. Do not install global tools silently. If unavailable, report the missing prerequisite.
-- [ ] Create the package metadata below, `.python-version` containing `3.13`, empty `src/lorai/__init__.py`, and `.gitignore` as shown. Do not create `policy.py` yet.
+- [ ] Create the package metadata below, `.python-version` containing `3.13`, empty `src/lcq/__init__.py`, and `.gitignore` as shown. Do not create `policy.py` yet.
 
 ```toml
 [project]
-name = "lorai"
+name = "lcq"
 version = "0.1.0"
 description = "Known-membership endorsement protocol for constrained radio networks"
 requires-python = ">=3.13"
@@ -51,7 +51,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/lorai"]
+packages = ["src/lcq"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -86,7 +86,7 @@ dist/
 ```python
 import pytest
 
-from lorai.policy import Policy
+from lcq.policy import Policy
 
 
 @pytest.mark.parametrize("n,f,q", [(5, 2, 4), (10, 4, 8), (20, 8, 15), (100, 40, 71)])
@@ -124,8 +124,8 @@ def test_weights_are_copied_and_read_only():
         policy.weights["a"] = 99
 ```
 
-- [ ] Run `uv run pytest tests/test_policy.py -q`. Expected red: missing `lorai.policy`, not an unrelated dependency error.
-- [ ] Create `src/lorai/policy.py` with the following minimal implementation:
+- [ ] Run `uv run pytest tests/test_policy.py -q`. Expected red: missing `lcq.policy`, not an unrelated dependency error.
+- [ ] Create `src/lcq/policy.py` with the following minimal implementation:
 
 ```python
 from collections.abc import Mapping
@@ -177,7 +177,7 @@ class Policy:
 
 ## Task 2 — Count and weight decision, separately visible
 
-**Files:** Modify `src/lorai/policy.py`, `tests/test_policy.py`.
+**Files:** Modify `src/lcq/policy.py`, `tests/test_policy.py`.
 
 **Consumes:** `Policy` from Task 1. **Produces:** `QuorumResult` and `evaluate` defined above.
 
@@ -274,7 +274,7 @@ from itertools import combinations
 
 from hypothesis import given, strategies as st
 
-from lorai.policy import Policy, evaluate
+from lcq.policy import Policy, evaluate
 
 
 def test_all_small_count_quorums_intersect_in_more_than_fault_budget():
@@ -311,7 +311,7 @@ def test_threshold_is_feasible_and_intersection_bound_holds(n, bps):
 - [ ] Add this usage example to README with an explicit “trusted signer IDs only; no authentication in M1” warning:
 
 ```python
-from lorai.policy import Policy, evaluate
+from lcq.policy import Policy, evaluate
 
 policy = Policy({"a": 1, "b": 1, "c": 1, "d": 1, "e": 1})
 result = evaluate(policy, ["a", "b", "c", "d"])

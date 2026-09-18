@@ -4,9 +4,9 @@
 //! state machine, the journal, the clock or the group seal. These tests drive
 //! the real objects, so they are the ones entitled to say the protocol works.
 
-use lorai::domain::contracts::CONSULTATION_CUTOFF_SECONDS;
-use lorai::domain::time::MAX_CLOCK_SKEW_SECONDS;
-use lorai::sim::{Deliberation, Topology};
+use lcq::domain::contracts::CONSULTATION_CUTOFF_SECONDS;
+use lcq::domain::time::MAX_CLOCK_SKEW_SECONDS;
+use lcq::sim::{Deliberation, Topology};
 
 const GUARD_MS: u64 = 200;
 

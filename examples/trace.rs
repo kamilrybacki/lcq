@@ -6,10 +6,12 @@
 //! by hand rather than with a serialiser, because one example binary is not
 //! worth a dependency.
 
-use lorai::sim::{
-    ANTENNA_GAIN_DBI, DUTY_CYCLE_BUDGET_MS, Outcome, SENSITIVITY_DBM, Scenario, TX_POWER_DBM,
-    Topology, TraceEntry, airtime_ms_at, breakpoint_m, max_range_m, path_loss_db, radio_horizon_m,
-    sensitivity_dbm_at,
+use lcq::domain::contracts::CONSULTATION_CUTOFF_SECONDS;
+use lcq::domain::time::MAX_CLOCK_SKEW_SECONDS;
+use lcq::sim::{
+    ANTENNA_GAIN_DBI, DUTY_CYCLE_BUDGET_MS, Deliberation, Outcome, SENSITIVITY_DBM, Scenario,
+    TX_POWER_DBM, Topology, TraceEntry, airtime_ms_at, breakpoint_m, max_range_m, path_loss_db,
+    radio_horizon_m, sensitivity_dbm_at,
 };
 
 /// A signed, compacted endorsement frame.
@@ -29,8 +31,54 @@ fn main() {
     print_radio();
     print_path_loss();
     print_spreading();
+    print_deliberation();
     print_scenarios(&cases());
     println!("}}");
+}
+
+/// The whole protocol, for the page that must not keep showing one stage as if
+/// it were an endorsement.
+fn print_deliberation() {
+    println!("  \"deliberation\": {{");
+    println!("    \"cutoffS\": {CONSULTATION_CUTOFF_SECONDS},");
+    println!("    \"skewS\": {MAX_CLOCK_SKEW_SECONDS},");
+    println!(
+        "    \"floorS\": {},",
+        CONSULTATION_CUTOFF_SECONDS + MAX_CLOCK_SKEW_SECONDS
+    );
+    for (key, built, last) in [
+        ("random", Deliberation::new(10), false),
+        ("slotted", Deliberation::new(10).with_slots(GUARD_MS), true),
+    ] {
+        let r = built.run();
+        println!("    \"{key}\": {{");
+        println!("      \"endorsed\": {},", r.endorsed);
+        println!("      \"supporters\": {},", r.binding_supporters);
+        println!("      \"threshold\": {},", r.min_signers);
+        println!("      \"elapsedS\": {},", r.elapsed_s);
+        println!("      \"radioMs\": {},", r.radio_ms);
+        println!("      \"airtimeMs\": {},", r.airtime_ms);
+        println!("      \"frameBytes\": {},", r.frame_bytes);
+        print!("      \"stages\": [");
+        for (index, stage) in r.stages.iter().enumerate() {
+            if index > 0 {
+                print!(", ");
+            }
+            print!(
+                "{{\"frames\": {}, \"collided\": {}, \"lost\": {}, \"admitted\": {}, \"refused\": {}, \"airtimeMs\": {}, \"elapsedMs\": {}}}",
+                stage.frames_sent,
+                stage.collided,
+                stage.lost,
+                stage.admitted,
+                stage.refused,
+                stage.airtime_ms,
+                stage.elapsed_ms
+            );
+        }
+        println!("]");
+        println!("    }}{}", if last { "" } else { "," });
+    }
+    println!("  }},");
 }
 
 fn cases() -> Vec<(&'static str, Scenario)> {

@@ -105,7 +105,7 @@ question in the handoff.
 
 The earlier framing was "a signed vote does not fit 51 bytes at SF12, so we need
 either a shorter signature or fragmentation." The 51-byte figure is LoRaWAN's
-DR0 **application-payload** cap. `lorai` is peer-to-peer raw LoRa, where the PHY
+DR0 **application-payload** cap. `lcq` is peer-to-peer raw LoRa, where the PHY
 carries up to 255 bytes at any spreading factor. A 105-byte signed frame fits
 everywhere. What it cannot afford is the airtime.
 

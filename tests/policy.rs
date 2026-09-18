@@ -1,6 +1,6 @@
 //! Fleet manifest validation and threshold arithmetic.
 
-use lorai::{Policy, PolicyError};
+use lcq::{Policy, PolicyError};
 
 fn equal_fleet(n: usize) -> Vec<(String, u32)> {
     (0..n).map(|i| (i.to_string(), 1)).collect()

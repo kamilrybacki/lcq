@@ -1,4 +1,4 @@
-# lorai — projekt protokołu i pierwszego laboratorium
+# lcq — projekt protokołu i pierwszego laboratorium
 
 Data: 2026-09-18.
 
@@ -10,14 +10,14 @@ Zamknięta, z góry znana grupa niezależnych węzłów wymienia krótkie oceny 
 
 | Projekt/moduł | Odpowiedzialność |
 |---|---|
-| `lorai` | Kontrakt protokołu, tożsamość, kryptografia, etapy oceny, ważone quorum, trwały stan, kolejki, store-and-forward, adaptery transportu, zegar i symulacja |
-| `morsik-lora` | Wykorzystanie `lorai`: mapowanie danych Morsika, lokalna integracja HTTP/MQTT, przekazanie konsultacji do analizy, publikacja statusów |
+| `lcq` | Kontrakt protokołu, tożsamość, kryptografia, etapy oceny, ważone quorum, trwały stan, kolejki, store-and-forward, adaptery transportu, zegar i symulacja |
+| `morsik-lora` | Wykorzystanie `lcq`: mapowanie danych Morsika, lokalna integracja HTTP/MQTT, przekazanie konsultacji do analizy, publikacja statusów |
 | `morsik-analysis` | Źródła, ekstrakcja, korelacja, deterministyczny scoring, niezależna ocena modelu i jednorazowa ponowna ocena |
 | `morsik-dashboard` | Lokalna prezentacja ostrzeżeń, ocen, statusów i łączności; nie jest koordynatorem |
 
-Rdzeń `lorai` nie uruchamia LLM i nie zależy od morskich kategorii ostrzeżeń, HTTP, MQTT ani interfejsu użytkownika. Aplikacja dostarcza ustrukturyzowaną ocenę przez adapter. Gotowe biblioteki realizują kryptografię; nie tworzymy własnych algorytmów kryptograficznych.
+Rdzeń `lcq` nie uruchamia LLM i nie zależy od morskich kategorii ostrzeżeń, HTTP, MQTT ani interfejsu użytkownika. Aplikacja dostarcza ustrukturyzowaną ocenę przez adapter. Gotowe biblioteki realizują kryptografię; nie tworzymy własnych algorytmów kryptograficznych.
 
-W każdej jednostce Morsika jest lokalny Mosquitto. Nie ma wspólnego brokera floty ani mostkowania brokerów między jednostkami. Zdarzenia modułów przechodzą przez MQTT, odczyt stanu przez HTTP. Między jednostkami wolno komunikować się wyłącznie przez adapter radiowy/symulowany `lorai`.
+W każdej jednostce Morsika jest lokalny Mosquitto. Nie ma wspólnego brokera floty ani mostkowania brokerów między jednostkami. Zdarzenia modułów przechodzą przez MQTT, odczyt stanu przez HTTP. Między jednostkami wolno komunikować się wyłącznie przez adapter radiowy/symulowany `lcq`.
 
 ## 2. Etapy projektu
 
@@ -151,7 +151,7 @@ Odczyt repo `Code/Baltic_Hackaton_26` wykazał:
 - `src/domain/assess.py` i `src/config/weights.yaml`: niezależność jest heurystyką klas źródeł, nie pełnym grafem pochodzenia; duplikaty tekstu są oznaczane osobnym caveat.
 - `src/domain/schema.py`: model ekstrahuje dane, a obecny scoring jest osobny i deterministyczny; głosowanie i konsultacja będą nowym kontraktem, nie reinterpretacją `reliability.score`.
 
-`morsik-lora` mapuje te dane na kontrakt rdzenia. Uzupełnienie wspólnego ID/rewizji, kanonicznej treści i pochodzenia dowodów wymaga osobnej integracji; nie twierdzimy, że obecny kod dostarcza gotową całość. Warstwa HTTP/MQTT i morskie kody przesłanek należą do aplikacji, nie do rdzenia `lorai`.
+`morsik-lora` mapuje te dane na kontrakt rdzenia. Uzupełnienie wspólnego ID/rewizji, kanonicznej treści i pochodzenia dowodów wymaga osobnej integracji; nie twierdzimy, że obecny kod dostarcza gotową całość. Warstwa HTTP/MQTT i morskie kody przesłanek należą do aplikacji, nie do rdzenia `lcq`.
 
 ## 12. Proponowane doprecyzowania do przeglądu
 

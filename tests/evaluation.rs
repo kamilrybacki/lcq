@@ -1,6 +1,6 @@
 //! Count and weight thresholds, reported separately because they fail differently.
 
-use lorai::domain::quorum::{EvaluationError, Policy, evaluate};
+use lcq::domain::quorum::{EvaluationError, Policy, evaluate};
 
 fn equal_fleet(n: usize) -> Vec<(String, u32)> {
     (0..n).map(|i| (i.to_string(), 1)).collect()

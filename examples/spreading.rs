@@ -5,10 +5,10 @@
 //! raw `LoRa` carries 255 bytes at any spreading factor -- but what the hourly
 //! airtime budget buys at each one.
 
-use lorai::domain::contracts::Subject;
-use lorai::domain::time::Timestamp;
-use lorai::sim::{DUTY_CYCLE_BUDGET_MS, airtime_ms_at, sensitivity_dbm_at};
-use lorai::wire::{CompactEnvelope, SigningKey, encode_compact};
+use lcq::domain::contracts::Subject;
+use lcq::domain::time::Timestamp;
+use lcq::sim::{DUTY_CYCLE_BUDGET_MS, airtime_ms_at, sensitivity_dbm_at};
+use lcq::wire::{CompactEnvelope, SigningKey, encode_compact};
 
 /// Loss grows this fast with distance in the two-ray far field over water.
 const DB_PER_DOUBLING: f64 = 12.04;

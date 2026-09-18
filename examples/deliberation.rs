@@ -4,7 +4,7 @@
 //! stages through the real state machine, the real journal and the real group
 //! seal, and reports what that costs.
 
-use lorai::sim::{Deliberation, Scenario, Topology};
+use lcq::sim::{Deliberation, Scenario, Topology};
 
 const GUARD_MS: u64 = 200;
 

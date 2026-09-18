@@ -1,6 +1,6 @@
 //! What a spreading factor costs, measured rather than assumed.
 
-use lorai::sim::{DUTY_CYCLE_BUDGET_MS, airtime_ms, airtime_ms_at, sensitivity_dbm_at};
+use lcq::sim::{DUTY_CYCLE_BUDGET_MS, airtime_ms, airtime_ms_at, sensitivity_dbm_at};
 
 /// A signed, compacted endorsement frame, as `examples/spreading` measures it.
 const FRAME_BYTES: usize = 105;

@@ -1,6 +1,6 @@
 //! End-to-end: does a fleet actually reach endorsement over a lossy radio?
 
-use lorai::sim::{Scenario, Topology};
+use lcq::sim::{Scenario, Topology};
 
 #[test]
 fn a_healthy_five_node_fleet_reaches_endorsement() {
@@ -150,7 +150,7 @@ fn distance_drops_members_out_of_the_quorum() {
 
 #[test]
 fn geometry_lets_a_near_member_capture_over_a_distant_one() {
-    use lorai::sim::{Link, Reception, TX_POWER_DBM, Transmission, receive, rssi_dbm};
+    use lcq::sim::{Link, Reception, TX_POWER_DBM, Transmission, receive, rssi_dbm};
 
     let near = Transmission::new(0, 1_500, rssi_dbm(&Link::new(1_000.0), TX_POWER_DBM));
     let far = Transmission::new(700, 1_500, rssi_dbm(&Link::new(15_000.0), TX_POWER_DBM));

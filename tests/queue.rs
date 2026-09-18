@@ -1,7 +1,7 @@
 //! Bounded queues, fairness, and what a hostile peer cannot take from us.
 
-use lorai::application::{OutgoingFrame, Priority, QueueError, RadioQueue};
-use lorai::domain::time::Timestamp;
+use lcq::application::{OutgoingFrame, Priority, QueueError, RadioQueue};
+use lcq::domain::time::Timestamp;
 
 fn frame(seq: u64, bytes: usize) -> OutgoingFrame {
     OutgoingFrame::new(vec![0u8; bytes], seq)

@@ -1,17 +1,17 @@
 //! What it costs that no frame on the air says "heard you".
 
-use lorai::sim::{Acknowledgement, DUTY_CYCLE_BUDGET_MS, Scenario};
+use lcq::sim::{Acknowledgement, DUTY_CYCLE_BUDGET_MS, Scenario};
 
 const GUARD_MS: u64 = 200;
 
-fn informed(prior_ms: u64) -> lorai::sim::Report {
+fn informed(prior_ms: u64) -> lcq::sim::Report {
     Scenario::new(10)
         .with_slots(GUARD_MS)
         .with_prior_airtime_ms(prior_ms)
         .run()
 }
 
-fn blind(prior_ms: u64) -> lorai::sim::Report {
+fn blind(prior_ms: u64) -> lcq::sim::Report {
     Scenario::new(10)
         .with_slots(GUARD_MS)
         .with_prior_airtime_ms(prior_ms)

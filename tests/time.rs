@@ -1,6 +1,6 @@
 //! Bounded clock error and what a node may conclude under it.
 
-use lorai::domain::time::{Clock, FixedClock, MAX_CLOCK_SKEW_SECONDS, Timestamp};
+use lcq::domain::time::{Clock, FixedClock, MAX_CLOCK_SKEW_SECONDS, Timestamp};
 
 #[test]
 fn a_deadline_is_certainly_passed_only_beyond_the_skew_budget() {
@@ -58,7 +58,7 @@ fn the_skew_budget_is_pairwise_and_the_source_accuracy_is_half_of_it() {
     // bounds how far two honest nodes can be from EACH OTHER; a time source
     // that holds each node within the whole budget of a reference allows two
     // nodes to be twice the budget apart, which would break the inference.
-    use lorai::domain::time::{MAX_CLOCK_SKEW_SECONDS, REQUIRED_SOURCE_ACCURACY_SECONDS};
+    use lcq::domain::time::{MAX_CLOCK_SKEW_SECONDS, REQUIRED_SOURCE_ACCURACY_SECONDS};
     assert_eq!(REQUIRED_SOURCE_ACCURACY_SECONDS * 2, MAX_CLOCK_SKEW_SECONDS);
 }
 
@@ -67,7 +67,7 @@ fn a_deadline_certainly_past_here_is_past_on_every_honest_clock() {
     // The property the budget exists to give. Two nodes at opposite ends of the
     // pairwise budget: if the one ahead is certain, the one behind has at least
     // reached the deadline, so it can never still be certainly before it.
-    use lorai::domain::time::{Clock, FixedClock, MAX_CLOCK_SKEW_SECONDS, Timestamp};
+    use lcq::domain::time::{Clock, FixedClock, MAX_CLOCK_SKEW_SECONDS, Timestamp};
 
     let deadline = Timestamp::from_secs(1_000);
     for offset in 0..=MAX_CLOCK_SKEW_SECONDS {

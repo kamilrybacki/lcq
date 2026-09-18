@@ -1,8 +1,8 @@
 //! Stage transitions: the acceptance list from the roadmap, as tests.
 
-use lorai::domain::contracts::{Opinion, Stage, Subject, Verdict};
-use lorai::domain::state::{Case, Phase, TransitionError};
-use lorai::domain::time::{FixedClock, Timestamp};
+use lcq::domain::contracts::{Opinion, Stage, Subject, Verdict};
+use lcq::domain::state::{Case, Phase, TransitionError};
+use lcq::domain::time::{FixedClock, Timestamp};
 
 fn subject_at(start: u64) -> Subject {
     Subject::new("m1", "e1", 0, [7; 32], Timestamp::from_secs(start)).expect("valid")

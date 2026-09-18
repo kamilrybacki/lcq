@@ -3,7 +3,7 @@
 //! Under slotted access the channel is busy most of the round, so further gains
 //! have to come from fewer frames or smaller ones. This measures which.
 
-use lorai::sim::{DUTY_CYCLE_BUDGET_MS, Scenario, airtime_ms};
+use lcq::sim::{DUTY_CYCLE_BUDGET_MS, Scenario, airtime_ms};
 
 /// Sizes taken from the wire format, not estimated.
 const SIGNATURE_BYTES: usize = 64;
@@ -100,6 +100,6 @@ fn main() {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn per_node(report: &lorai::sim::Report, fleet: usize) -> f64 {
+fn per_node(report: &lcq::sim::Report, fleet: usize) -> f64 {
     report.airtime_ms as f64 / fleet as f64 / 1000.0
 }

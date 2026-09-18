@@ -3,7 +3,7 @@
 //! Kept as a regression witness: it demonstrates the failure the author index
 //! in the nonce prevents, and asserts that it no longer happens.
 
-use lorai::wire::{GroupKey, seal};
+use lcq::wire::{GroupKey, seal};
 
 fn main() {
     let group = GroupKey::from_bytes([0x5a; 32]);

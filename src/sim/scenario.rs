@@ -10,7 +10,10 @@ use crate::sim::channel::{Topology, airtime_ms};
 use crate::sim::medium::{Reception, Transmission, duty_cycle_ok, receive};
 use crate::sim::phy::{Link, RicianFading, TX_POWER_DBM, rssi_dbm};
 use crate::sim::rng::Rng;
-use crate::wire::{CompactEnvelope, SigningKey, VerifyingKey, decode_compact, encode_compact};
+use crate::wire::{
+    CompactEnvelope, GroupKey, SigningKey, VerifyingKey, decode_compact, encode_compact,
+    open_frame, seal_frame,
+};
 
 extern crate alloc;
 
@@ -379,18 +382,24 @@ impl Scenario {
         } else {
             &keys[sender]
         };
+        let author = u16::try_from(sender).unwrap_or(u16::MAX);
+        let sequence = sender as u64;
         let envelope = CompactEnvelope::new(
             1,
             1,
             0,
             *subject.content_hash(),
             subject.started_at().as_secs(),
-            u16::try_from(sender).unwrap_or(u16::MAX),
+            author,
             3,
             1,
-            sender as u64,
+            sequence,
         );
-        encode_compact(&envelope.sign(signing)).expect("encodes")
+        let signed = encode_compact(&envelope.sign(signing)).expect("encodes");
+        // What goes on the air is sealed and carries its nonce header. Timing
+        // the signed-but-unsealed form understates every airtime figure by a
+        // fifth, and airtime is what the duty cycle is spent on.
+        seal_frame(&group_key(), author, sequence, &signed).expect("seals")
     }
 }
 
@@ -603,7 +612,11 @@ impl<'a> Run<'a> {
 
     /// Verify a received frame and record its author's support.
     fn accept(&mut self, sender: usize) -> Outcome {
-        let Ok(received) = decode_compact(&self.frames[sender]) else {
+        let Ok((_, _, plain)) = open_frame(&group_key(), &self.frames[sender]) else {
+            self.tally.rejected += 1;
+            return Outcome::Rejected;
+        };
+        let Ok(received) = decode_compact(&plain) else {
             self.tally.rejected += 1;
             return Outcome::Rejected;
         };
@@ -690,6 +703,11 @@ impl Tally {
             outcome,
         });
     }
+}
+
+/// The mission group key. One fleet, one key, fixed for a scenario.
+fn group_key() -> GroupKey {
+    GroupKey::from_bytes([0x5a; 32])
 }
 
 fn member_id(index: usize) -> String {

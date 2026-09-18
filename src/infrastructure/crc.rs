@@ -57,6 +57,6 @@ mod tests {
 
     #[test]
     fn a_single_flipped_bit_changes_the_checksum() {
-        assert_ne!(crc32(b"lorai"), crc32(b"lorbi"));
+        assert_ne!(crc32(b"lcq"), crc32(b"lorbi"));
     }
 }

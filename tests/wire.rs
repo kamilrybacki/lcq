@@ -1,8 +1,8 @@
 //! Wire format and cryptography: what a hostile peer must not be able to do.
 
-use lorai::domain::contracts::{Stage, Subject, Verdict};
-use lorai::domain::time::Timestamp;
-use lorai::wire::{Envelope, GroupKey, SigningKey, WireError, decode, encode, open, seal};
+use lcq::domain::contracts::{Stage, Subject, Verdict};
+use lcq::domain::time::Timestamp;
+use lcq::wire::{Envelope, GroupKey, SigningKey, WireError, decode, encode, open, seal};
 
 fn subject() -> Subject {
     Subject::new("m1", "e1", 0, [0x5A; 32], Timestamp::from_secs(1_000)).expect("valid")
@@ -150,7 +150,7 @@ fn a_compact_frame_reaches_the_mid_range_spreading_factor() {
     // Strings are a luxury the radio cannot afford: the manifest already knows
     // every member and mission, so the wire carries indices into it. This is
     // what gets a core vote under the SF10 payload limit of 133 bytes.
-    use lorai::wire::CompactEnvelope;
+    use lcq::wire::CompactEnvelope;
 
     let signer = SigningKey::from_seed([1; 32]);
     let compact = CompactEnvelope::new(
@@ -177,10 +177,10 @@ fn a_compact_frame_reaches_the_mid_range_spreading_factor() {
 fn a_compact_frame_fits_a_raw_lora_payload_at_any_spreading_factor() {
     // This test previously asserted the opposite, on the premise that SF12 is
     // limited to 51 bytes. That figure is LoRaWAN's DR0 application-payload cap,
-    // not a LoRa PHY limit, and lorai is peer-to-peer raw LoRa. The frame fits
+    // not a LoRa PHY limit, and lcq is peer-to-peer raw LoRa. The frame fits
     // everywhere; what it cannot afford is the airtime. See `DECISIONS.md` D2
     // and `tests/spreading.rs`, which measure the cost instead of assuming it.
-    use lorai::wire::CompactEnvelope;
+    use lcq::wire::CompactEnvelope;
 
     let signer = SigningKey::from_seed([1; 32]);
     let compact = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1);
@@ -192,7 +192,7 @@ fn a_compact_frame_fits_a_raw_lora_payload_at_any_spreading_factor() {
     );
 }
 
-use lorai::wire::encode_compact;
+use lcq::wire::encode_compact;
 
 #[test]
 fn two_members_counting_from_zero_do_not_share_a_nonce() {
@@ -201,7 +201,7 @@ fn two_members_counting_from_zero_do_not_share_a_nonce() {
     // would seal under identical keystream. The XOR of the ciphertexts would
     // then be the XOR of the plaintexts, which is total loss of confidentiality
     // and hands over the Poly1305 key as well.
-    use lorai::wire::{GroupKey, seal};
+    use lcq::wire::{GroupKey, seal};
 
     let group = GroupKey::from_bytes([0x5a; 32]);
     let a = seal(&group, 0, 0, b"aaaaaaaaaaaaaaaaaaaa").expect("seals");
@@ -220,7 +220,7 @@ fn two_members_counting_from_zero_do_not_share_a_nonce() {
 fn a_frame_taken_off_the_air_can_be_opened_without_prior_knowledge() {
     // The nonce cannot live inside the thing it decrypts. A receiver holding
     // only the group key and the bytes must be able to open the frame.
-    use lorai::wire::{GroupKey, open_frame, seal_frame};
+    use lcq::wire::{GroupKey, open_frame, seal_frame};
 
     let group = GroupKey::from_bytes([0x5a; 32]);
     let frame = seal_frame(&group, 7, 12_345, b"binding support").expect("seals");
@@ -235,7 +235,7 @@ fn altering_the_cleartext_header_breaks_the_frame() {
     // The header is associated data, so it is authenticated even though it is
     // readable. Rewriting it in flight destroys the frame rather than
     // redirecting it.
-    use lorai::wire::{GroupKey, open_frame, seal_frame};
+    use lcq::wire::{GroupKey, open_frame, seal_frame};
 
     let group = GroupKey::from_bytes([0x5a; 32]);
     let mut frame = seal_frame(&group, 7, 12_345, b"binding support").expect("seals");
@@ -245,7 +245,7 @@ fn altering_the_cleartext_header_breaks_the_frame() {
 
 #[test]
 fn a_frame_shorter_than_its_header_is_refused_not_guessed() {
-    use lorai::wire::{FRAME_HEADER_BYTES, GroupKey, open_frame};
+    use lcq::wire::{FRAME_HEADER_BYTES, GroupKey, open_frame};
 
     let group = GroupKey::from_bytes([0x5a; 32]);
     assert!(open_frame(&group, &[0u8; FRAME_HEADER_BYTES]).is_err());

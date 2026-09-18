@@ -1,6 +1,6 @@
 //! Propagation, collisions, capture and duty cycle.
 
-use lorai::sim::{
+use lcq::sim::{
     CAPTURE_THRESHOLD_DB, DUTY_CYCLE_BUDGET_MS, Link, Reception, RicianFading, SENSITIVITY_DBM,
     Transmission, capture_wins, duty_cycle_ok, path_loss_db, radio_horizon_m, receive, rssi_dbm,
 };
@@ -155,7 +155,7 @@ fn duty_cycle_refuses_a_node_that_has_used_its_hourly_budget() {
 fn the_usable_range_is_limited_by_the_horizon_not_the_link_budget() {
     // Over water the curvature runs out before the signal does: at 14 dBm the
     // budget would still close past 30 km, but nothing is there to hear it.
-    use lorai::sim::max_range_m;
+    use lcq::sim::max_range_m;
     let range = max_range_m(14.0);
     assert!(
         (range - radio_horizon_m()).abs() < 1.0,
@@ -166,7 +166,7 @@ fn the_usable_range_is_limited_by_the_horizon_not_the_link_budget() {
 
 #[test]
 fn a_weak_transmitter_is_limited_by_its_budget_instead() {
-    use lorai::sim::max_range_m;
+    use lcq::sim::max_range_m;
     let range = max_range_m(-40.0);
     assert!(
         range < radio_horizon_m(),

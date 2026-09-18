@@ -10,7 +10,7 @@ Acceptance: 5/10/20/100-node examples; exact strict weight boundary; duplicates 
 
 ## M2 — Logical contracts and positive-only state machine
 
-Proposed files: `src/lorai/contracts.py`, `src/lorai/clock.py`, `src/lorai/state.py`, `tests/test_contracts.py`, `tests/test_state.py`.
+Proposed files: `src/lcq/contracts.py`, `src/lcq/clock.py`, `src/lcq/state.py`, `tests/test_contracts.py`, `tests/test_state.py`.
 
 Gate: approve exact subject identity, revision/namespace encoding, timing authority, permitted clock error and behavior for nodes arriving after consultation cutoff. Recommended conservative behavior: a late node forwards valid messages but does not fabricate a completed independent phase.
 
@@ -20,7 +20,7 @@ Acceptance: opinions do not count as binding votes; stage isolation; no cross-ve
 
 ## M3 — Durable identity, active state and outbox
 
-Proposed files: `src/lorai/storage.py`, `tests/test_storage.py`, `tests/test_crash_recovery.py`.
+Proposed files: `src/lcq/storage.py`, `tests/test_storage.py`, `tests/test_crash_recovery.py`.
 
 Gate: CLEARED 2026-09-18. `LogJournal` implements the append-only journal; ordering, partial-record tails and recovery truncation are covered by `tests/log_journal.rs`, including an exhaustive truncation sweep and a SIGKILLed writer. SQLite was rejected for this role -- see `DECISIONS.md` D1. Still open: behaviour when the disk is full, and lock pruning for cases past their validity.
 
@@ -30,7 +30,7 @@ Acceptance: crash before/after commit, before/after send and before/after acknow
 
 ## M4 — Cryptography and compact wire codec
 
-Proposed files: `src/lorai/crypto.py`, `src/lorai/codec.py`, `tests/test_crypto.py`, `tests/test_codec.py`, `tests/vectors/README.md`.
+Proposed files: `src/lcq/crypto.py`, `src/lcq/codec.py`, `tests/test_crypto.py`, `tests/test_codec.py`, `tests/vectors/README.md`.
 
 Gate: a reviewed byte-level specification with integer widths, byte order, signed transcript/domain separation, full manifest binding, nonce construction, per-sender key separation if used, AEAD associated data, replay processing and error behavior. Include byte budgets for core/support/evidence under each transport. Select a maintained library and pin the tested dependency lockfile. Do not truncate signatures to save airtime.
 
@@ -40,7 +40,7 @@ Acceptance: golden vectors, tamper every field, wrong sender/mission/epoch/profi
 
 ## M5 — Queues, fair scheduling and forwarding
 
-Proposed files: `src/lorai/queue.py`, `src/lorai/transport.py`, `src/lorai/forwarding.py`, `tests/test_queue.py`, `tests/test_forwarding.py`.
+Proposed files: `src/lcq/queue.py`, `src/lcq/transport.py`, `src/lcq/forwarding.py`, `tests/test_queue.py`, `tests/test_forwarding.py`.
 
 Gate: choose bounded queue bytes/items, per-peer quotas, retry limits, hop policy and fairness weights with rationale. Dedup retention must cover the permitted delay/validity model. TTL is not a cryptographic guarantee against malicious relays.
 
@@ -50,7 +50,7 @@ Acceptance: partition then reconnection, burst of high-priority traffic, slow pe
 
 ## M6 — Virtual-time radio laboratory
 
-Proposed files: `src/lorai/sim/clock.py`, `src/lorai/sim/channel.py`, `src/lorai/sim/scenario.py`, `src/lorai/sim/report.py`, `src/lorai/cli.py`, `scenarios/`, `tests/sim/`.
+Proposed files: `src/lcq/sim/clock.py`, `src/lcq/sim/channel.py`, `src/lcq/sim/scenario.py`, `src/lcq/sim/report.py`, `src/lcq/cli.py`, `scenarios/`, `tests/sim/`.
 
 Gate: approve one concrete LoRa PHY profile, airtime calculation and its golden examples, regulatory duty model as a simulation constraint, collision/capture simplifications, directed topology, loss-burst process, clock-error bounds and random seeds. No claims about real maritime range from synthetic path loss.
 
@@ -60,7 +60,7 @@ Acceptance: healthy trace plus N=5/10/20 matrices, one alert/10min and five-aler
 
 ## M7 — Wall-time protocol integration
 
-Proposed files: `src/lorai/runtime.py`, `tests/integration/`, `examples/isolated-lab/`.
+Proposed files: `src/lcq/runtime.py`, `tests/integration/`, `examples/isolated-lab/`.
 
 Gate: define least-privilege process/container layout and prove the only inter-node data path is the simulated radio. No Docker socket in participants; no shared participant state directories; no host-network bypass. Resource caps include the runtime and observer instrumentation.
 

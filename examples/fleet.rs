@@ -1,6 +1,6 @@
 //! Run a fleet through endorsement under a few conditions.
 
-use lorai::sim::{Scenario, Topology};
+use lcq::sim::{Scenario, Topology};
 
 fn main() {
     println!(

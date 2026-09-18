@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use lorai::{Policy, evaluate};
+use lcq::{Policy, evaluate};
 use proptest::prelude::*;
 
 fn equal_fleet(n: usize) -> Vec<(String, u32)> {

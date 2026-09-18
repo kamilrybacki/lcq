@@ -1,7 +1,7 @@
 //! What actually goes on the air, measured at every stage.
 
-use lorai::sim::airtime_ms;
-use lorai::wire::{
+use lcq::sim::airtime_ms;
+use lcq::wire::{
     CompactEnvelope, FRAME_HEADER_BYTES, GroupKey, SigningKey, encode_compact, seal, seal_frame,
 };
 

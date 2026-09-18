@@ -1,9 +1,9 @@
 [package]
-name = "lorai"
+name = "lcq"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-description = "Known-membership endorsement protocol for constrained radio networks"
+description = "LoRa-based Confidence Quorum Protocol: known-membership endorsement for constrained radio networks"
 license = "MIT"
 
 [dependencies]

@@ -1,8 +1,8 @@
 //! Measure a core frame against real `LoRa` payload limits.
 
-use lorai::domain::contracts::{Stage, Subject, Verdict};
-use lorai::domain::time::Timestamp;
-use lorai::wire::{CompactEnvelope, Envelope, GroupKey, SigningKey, encode, encode_compact, seal};
+use lcq::domain::contracts::{Stage, Subject, Verdict};
+use lcq::domain::time::Timestamp;
+use lcq::wire::{CompactEnvelope, Envelope, GroupKey, SigningKey, encode, encode_compact, seal};
 
 fn main() {
     let subject = Subject::new(

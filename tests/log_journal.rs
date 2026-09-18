@@ -17,10 +17,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lorai::application::{Journal, JournalError, OutgoingFrame};
-use lorai::domain::contracts::Subject;
-use lorai::domain::time::Timestamp;
-use lorai::infrastructure::LogJournal;
+use lcq::application::{Journal, JournalError, OutgoingFrame};
+use lcq::domain::contracts::Subject;
+use lcq::domain::time::Timestamp;
+use lcq::infrastructure::LogJournal;
 
 /// A directory that cleans up after itself, so a failing run leaves no litter.
 struct Scratch(PathBuf);
@@ -28,7 +28,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!(
-            "lorai-{name}-{}-{:?}",
+            "lcq-{name}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -373,7 +373,7 @@ fn compaction_survives_being_reopened_and_written_to() {
  * ------------------------------------------------------------------ */
 
 /// Env var that turns this test binary into the writer child.
-const WRITER: &str = "LORAI_JOURNAL_WRITER";
+const WRITER: &str = "LCQ_JOURNAL_WRITER";
 
 #[test]
 fn journal_writer_child() {

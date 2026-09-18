@@ -1,9 +1,9 @@
 //! Safety state that must survive a restart, and the order it must be written in.
 
-use lorai::application::{Journal, JournalError, OutgoingFrame};
-use lorai::domain::contracts::Subject;
-use lorai::domain::time::Timestamp;
-use lorai::infrastructure::MemoryJournal;
+use lcq::application::{Journal, JournalError, OutgoingFrame};
+use lcq::domain::contracts::Subject;
+use lcq::domain::time::Timestamp;
+use lcq::infrastructure::MemoryJournal;
 
 fn subject(rev: u32) -> Subject {
     Subject::new("m1", "e1", rev, [3; 32], Timestamp::from_secs(1_000)).expect("valid")

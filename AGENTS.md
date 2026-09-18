@@ -2,11 +2,11 @@
 
 ## Start here
 
-This repository is `lorai`, the reusable protocol project, NOT the Morsik application.
+This repository is `lcq`, the reusable protocol project, NOT the Morsik application.
 Read in order:
 
 1. `docs/HANDOFF.md` — current state and next action.
-2. `docs/superpowers/specs/2026-09-18-lorai-design.md` — approved product decisions and proposed technical refinements.
+2. `docs/superpowers/specs/2026-09-18-lcq-design.md` — approved product decisions and proposed technical refinements.
 3. `docs/IMPLEMENTATION-ROADMAP.md` — milestone boundaries and acceptance gates.
 4. The implementation plan named in `docs/HANDOFF.md`.
 
@@ -14,7 +14,7 @@ The design discussion was in Polish; code and identifiers should be English. No 
 
 ## Scope
 
-- `lorai` owns protocol, signatures/encryption, quorum, durable protocol state, radio queues/forwarding, transport/clock interfaces and simulation.
+- `lcq` owns protocol, signatures/encryption, quorum, durable protocol state, radio queues/forwarding, transport/clock interfaces and simulation.
 - `morsik-lora` is a separate application integration repository. It owns local MQTT/HTTP wiring and mapping Morsik data onto protocol contracts.
 - All actual model inference belongs to `morsik-analysis`. `morsik-dashboard` is presentation only.
 - Do not modify sibling repositories, rename Morsik modules, install a broker, deploy containers, call live models, or access operational maritime sources unless that milestone is explicitly authorized.

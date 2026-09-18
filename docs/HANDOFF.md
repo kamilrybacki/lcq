@@ -146,12 +146,12 @@ then multi-process operation with wall clocks, or the model-integration stage. T
 
 ## Original state at 2026-09-18
 
-- GitHub: https://github.com/kamilrybacki/lorai.git
-- Local checkout used to prepare this handoff: `/home/kamil-rybacki/Code/lorai`.
+- GitHub: https://github.com/kamilrybacki/lcq.git
+- Local checkout used to prepare this handoff: `/home/kamil-rybacki/Code/lcq`.
 - Separate integration repository: https://github.com/kamilrybacki/morsik-lora.git
 - Original Morsik code inspected read-only: `/home/kamil-rybacki/Code/Baltic_Hackaton_26`.
 - Product design and acceptance criteria were discussed and approved. User requested specifications and plans usable by Claude Code.
-- Implementation has NOT started. No package, test suite, radio, model, broker or container has been launched for `lorai`.
+- Implementation has NOT started. No package, test suite, radio, model, broker or container has been launched for `lcq`.
 - Documents contain all relevant product decisions. No need to recover the original chat.
 - A written-spec review is still required for proposed technical choices, especially cryptography, exact wire layout, clock error budget and radio profiles.
 

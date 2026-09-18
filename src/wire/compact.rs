@@ -25,7 +25,7 @@ use crate::wire::crypto::{SigningKey, VerifyingKey, WireError};
 
 extern crate alloc;
 
-const COMPACT_DOMAIN: &[u8] = b"lorai-v1-compact";
+const COMPACT_DOMAIN: &[u8] = b"lcq-v1-compact";
 
 /// A core utterance addressed by manifest indices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -12,9 +12,9 @@ use crate::wire::crypto::{SigningKey, VerifyingKey, WireError};
 
 extern crate alloc;
 
-/// Domain separator. Prefixing the transcript keeps a lorai signature from ever
+/// Domain separator. Prefixing the transcript keeps a lcq signature from ever
 /// verifying as a signature over anything else the same key might sign.
-const TRANSCRIPT_DOMAIN: &[u8] = b"lorai-v1-endorsement";
+const TRANSCRIPT_DOMAIN: &[u8] = b"lcq-v1-endorsement";
 
 /// One node's utterance, in the form that travels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

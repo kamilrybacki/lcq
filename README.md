@@ -1,6 +1,14 @@
-# lorai
+# LCQ Protocol
 
-Known-membership endorsement protocol for constrained radio networks.
+**LoRa-based Confidence Quorum Protocol.** Crate: `lcq`.
+
+A known-membership endorsement protocol for constrained radio networks: a fleet
+whose members already hold each other's keys agrees, over one narrow LoRa
+channel, whether a safety claim has enough confident support behind it to be
+acted on. Membership is fixed, so the question is never who may speak — only
+whether enough of them committed.
+
+(*LoRa*, the radio modulation. Not *LoRA*, the machine-learning method.)
 
 Built for fleets that must agree on a safety claim over LoRa, where a payload is
 tens of bytes, there is no central server, and up to 40 % of members may be
@@ -15,7 +23,7 @@ piece — the arithmetic that everything later depends on.
 ## Usage
 
 ```rust
-use lorai::{evaluate, Policy};
+use lcq::{evaluate, Policy};
 
 let policy = Policy::new(
     ["a", "b", "c", "d", "e"].map(|id| (id.to_string(), 1)),

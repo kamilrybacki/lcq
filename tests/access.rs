@@ -1,6 +1,6 @@
 //! Random contention against slots earned by manifest index.
 
-use lorai::sim::{Access, Report, Scenario, Topology};
+use lcq::sim::{Access, Report, Scenario, Topology};
 
 /// Dead time between slots: demodulation jitter plus drift across a round.
 const GUARD_MS: u64 = 200;

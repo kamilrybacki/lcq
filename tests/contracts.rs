@@ -1,7 +1,7 @@
 //! Subject identity, opinions and the line between an opinion and a vote.
 
-use lorai::domain::contracts::{Opinion, Stage, Subject, SubjectError, Verdict};
-use lorai::domain::time::Timestamp;
+use lcq::domain::contracts::{Opinion, Stage, Subject, SubjectError, Verdict};
+use lcq::domain::time::Timestamp;
 
 fn subject() -> Subject {
     Subject::new(

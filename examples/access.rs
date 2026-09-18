@@ -4,7 +4,7 @@
 //! index into the manifest. This measures what that knowledge is worth if the
 //! radio schedule uses it instead of making everyone draw for the channel.
 
-use lorai::sim::{Scenario, Topology};
+use lcq::sim::{Scenario, Topology};
 
 /// Dead time between slots. Covers the spread in when members decided the
 /// trigger ended, plus oscillator drift across one round.
@@ -73,7 +73,7 @@ fn main() {
     println!("liczonej od ramki wyzwalajacej runde -- nie od zegara sciennego.");
 }
 
-fn duration(report: &lorai::sim::Report) -> f64 {
+fn duration(report: &lcq::sim::Report) -> f64 {
     let end = report
         .timeline
         .iter()
