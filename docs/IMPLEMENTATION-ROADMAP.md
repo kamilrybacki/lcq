@@ -94,3 +94,6 @@ Complete M1 does not mean complete protocol. Complete M6 does not mean validated
 
 
 Radio scheduling: slotted access by manifest index is the default design -- see `DECISIONS.md` D3. Random contention is retained as the measurement baseline and as a fallback where the trigger is not commonly heard.
+
+
+BLOCKER before any slotted deployment: the slot schedule has no canonical anchor, so a compromised manifest member can equivocate on the trigger and split honest nodes onto colliding schedules. See `DECISIONS.md` D5. Random contention is unaffected and remains the default.

@@ -9,18 +9,40 @@
 //! binding vote. It still raises a local warning, because refusing to vote is
 //! not the same as deciding there is no danger.
 
-/// Tolerated one-way clock error between two honest nodes, in seconds.
+/// The largest difference **between any two honest clocks**, in seconds.
 ///
-/// Chosen against the 5-minute consultation cutoff: at 30 s the uncertainty
-/// band is a tenth of the window, so two honest nodes cannot disagree about
-/// whether the window is open unless one of them is far outside the budget.
-/// A budget approaching the cutoff would make disagreement routine.
+/// Pairwise, not per-node. This distinction decides whether [`Clock`] is
+/// correct: `certainly_after` concludes that a deadline has passed for
+/// *everybody* from the fact that it has passed here by more than this budget,
+/// and that inference needs the bound on how far two nodes can differ from each
+/// other — not on how far each differs from some reference.
+///
+/// The deployment consequence follows directly. If nodes discipline their
+/// clocks against a common source and each may be up to `e` seconds off it,
+/// two of them can be `2e` apart, so the source must hold every node inside
+/// **half** this budget: 15 s for the 30 s configured here. A deployment that
+/// reads this as a per-node allowance has quietly doubled the real skew and
+/// broken every `certainly_after` in the protocol.
 pub const MAX_CLOCK_SKEW_SECONDS: u64 = 30;
 
-/// The skew budget must stay an order of magnitude below the consultation
-/// window, or two honest nodes could routinely disagree about whether that
-/// window is open. Enforced at compile time rather than by a test, because a
-/// build that violates it should not exist.
+/// Per-node accuracy a time source must hold to honour the pairwise budget.
+///
+/// Stated as its own constant because it is the number an operator configures,
+/// and halving is exactly the step that gets forgotten.
+pub const REQUIRED_SOURCE_ACCURACY_SECONDS: u64 = MAX_CLOCK_SKEW_SECONDS / 2;
+
+/// The skew budget must stay well below the consultation window, or two honest
+/// nodes could routinely disagree about whether that window is open. Enforced
+/// at compile time rather than by a test, because a build that violates it
+/// should not exist.
+///
+/// The factor of ten is a **chosen margin, not a derived bound**. What is
+/// actually required is only that the window exceed the uncertainty band, which
+/// would allow a ratio near two; below about four the band starts to occupy
+/// enough of the window that ordinary drift produces disagreement, and ten
+/// leaves room for a deployment to raise the budget without revisiting the
+/// cutoff. Recorded plainly because an unexplained constant invites someone to
+/// treat it as load-bearing arithmetic.
 const _: () =
     assert!(MAX_CLOCK_SKEW_SECONDS * 10 <= crate::domain::contracts::CONSULTATION_CUTOFF_SECONDS);
 

@@ -296,3 +296,90 @@ great deal of airtime and no correctness at all.
 
 Truncating the signature. Concatenating votes without aggregating them. Raising
 the spreading factor for range (D2). Assuming a shared wall clock (D3).
+
+---
+
+## D5 — What the simulation was actually testing, and the two bugs that found
+
+**Recorded 2026-09-18**, after an audit prompted by the question "does the
+simulation reflect the real algorithm". The answer was no, and building one that
+did found two defects in the protocol itself.
+
+### What `sim::Scenario` covers
+
+It signs frames, collides them on a modelled channel and counts signatures. It
+never touched:
+
+| layer | exercised |
+|---|---|
+| quorum arithmetic (`Policy`, `evaluate`) | yes |
+| signatures (`CompactEnvelope`, verify) | yes |
+| radio (collisions, capture, path loss, duty cycle) | yes |
+| **state machine** (`Case`, `Phase`, expiry, cutoff) | **no** |
+| **journal** (vote locks, sequence reservation) | **no** |
+| **clock** (`Clock`, skew) | **no** |
+| **group encryption** (`seal`/`open`) | **no** |
+| radio queue (priority, dedup) | no |
+
+So every figure this project reported came from a model of **one round of one
+stage**. `sim::Deliberation` drives the real objects and is the one entitled to
+say anything about the protocol.
+
+### Two defects, both found by building it
+
+**Cross-member nonce collision (critical).** The group key is shared; each
+member counts its own sequence from zero; the sequence was the entire nonce.
+Two members' first frames therefore sealed under identical keystream.
+`examples/nonce_proof` showed the XOR of the ciphertexts reproducing the XOR of
+the plaintexts. Fixed by putting the author index in the nonce. An independent
+review reached the same conclusion unprompted and rated it a blocker.
+
+**Frames could not be opened.** The sequence is the nonce and lived only inside
+the ciphertext that needed it. `seal_frame`/`open_frame` now carry the author
+index and sequence in a cleartext header which is also the AAD.
+
+**And one in the simulator that is a lesson about the protocol.** A collided
+vote must be retransmitted *from the outbox*. Rebuilding it asks the journal for
+a second vote lock on the same case, which it correctly refuses — and the member
+then never retransmits, losing its vote to the first collision with no error
+raised anywhere. The lock stops a second *decision*, not a second *transmission*,
+and an implementation that conflates them fails silently.
+
+### What the faithful run says
+
+| | random | slotted |
+|---|---:|---:|
+| elapsed | 421 s | 346 s |
+| radio time | 96 s | 45 s |
+| airtime | 54.7 s | 38.2 s |
+| on-air frame | 136 B | 136 B |
+
+**No endorsement can complete in under 330 s** — the 300 s consultation cutoff
+plus the skew allowance — however fast the radio is. The radio is 13 % of the
+elapsed time. The earlier "12× faster endorsement" (D3) measured one stage as
+if it were the whole thing; the scheduling win is real but it is a **radio-time
+and airtime** win, not a latency one. Airtime still matters most, because it is
+what the duty cycle meters.
+
+### Open blocker: the slot schedule has no canonical anchor
+
+Raised by review, and correct. D3 anchors slots at "the frame that triggered the
+round". A compromised member can broadcast **different but validly signed
+triggers to different receivers**, splitting honest nodes onto colliding
+schedules. Signatures do not prevent equivocation by a manifest member.
+
+The tension is real and not yet resolved:
+
+* Anchoring at signed content (`subject.started_at()`) is canonical but
+  wall-clock, so slots would have to exceed the skew budget — 30 s slots for a
+  1.3 s frame.
+* Anchoring at a heard frame gives millisecond accuracy but is equivocable.
+* A middle option is to make the round context include the trigger's hash, so
+  two triggers are two different rounds: the split stays visible and no quorum
+  is fabricated, but liveness still suffers.
+
+Until this is settled, slotted access is an airtime optimisation with a known
+liveness hole, not a security mechanism. Also outstanding from the same review:
+per-sender replay windows with retention limits, cheap rejection of senders
+outside the manifest, and reporting targeted slot denial and fairness rather
+than only collision counts.
