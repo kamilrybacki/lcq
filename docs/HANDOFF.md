@@ -198,3 +198,44 @@ Only documentation checks and arithmetic checks are applicable at this stage. Pr
 ## Update template for the next session
 
 Record milestone, approval scope, branch/commit, changed files, exact verification commands and outputs, known failures, unreviewed assumptions, and next action. Never record secrets. Do not mark manual acceptance yourself.
+
+
+---
+
+## State at the end of 2026-09-18
+
+The crate is now `lcq` (LCQ Protocol, LoRa-based Confidence Quorum). 183 tests,
+clippy pedantic clean. Fifteen commits ahead of `origin/main` and **not pushed**;
+the GitHub remote is still named `lorai`.
+
+### Done since the last handoff entry
+
+* **M3 durable journal** — `LogJournal`, append-only, `DECISIONS.md` D1.
+  Recovery tested at every byte offset a crash could land on, plus a SIGKILLed
+  writer.
+* **Radio model** — collisions, capture, two-ray path loss, Rician fading, duty
+  cycle. `DECISIONS.md` D2 settles the spreading factor on measurement.
+* **Slotted access** — D3, and D6 settles its anchor.
+* **Faithful simulator** — `sim::Deliberation` drives the real state machine,
+  journal, clock and group seal. `sim::Scenario` remains, and is **one round of
+  one stage**; anything it reports is about the channel, not the protocol.
+
+### Two defects fixed, both found by building the faithful simulator
+
+* Cross-member nonce collision under the shared group key (critical).
+* Frames that could not be opened, because the nonce lived inside the ciphertext.
+
+### What to pick up next
+
+1. **Equivocation on the trigger** (D6) — the one open blocker. Slots must
+   anchor on the trigger, so this cannot be dodged. Recommended treatment is
+   written down: round identity from the trigger hash, hearing two as evidence,
+   fall back to random contention on detection.
+2. **Acknowledgement on the air** (D4) — worth roughly 4.5x the airtime. Nothing
+   carries the fact today; `Journal::acknowledge` exists but no frame says it.
+3. **Short case reference** (D4) — 23 % off every frame, no security traded.
+4. Still unexercised by any simulation: `RadioQueue` (priority, dedup, distress
+   burst). Every member's `Case` other than the observer's is also not driven,
+   so `AlreadyVoted` is only tested at the journal, not the state machine.
+5. From review: per-sender replay windows with retention limits, cheap rejection
+   of senders outside the manifest.
