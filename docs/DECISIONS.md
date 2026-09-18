@@ -93,3 +93,71 @@ Neither applies now. `MemoryJournal` and this adapter sit behind the same
 std today and only written in a `no_std` style (`extern crate alloc`). The
 atomicity requirement and the absence of any query workload carry the decision
 on their own.
+
+---
+
+## D2 — SF10 is the operating floor; longer range comes from relaying, not SF12
+
+**Decided 2026-09-18.** Supersedes the open "SF12 signature or fragmentation"
+question in the handoff.
+
+### The question was wrong
+
+The earlier framing was "a signed vote does not fit 51 bytes at SF12, so we need
+either a shorter signature or fragmentation." The 51-byte figure is LoRaWAN's
+DR0 **application-payload** cap. `lorai` is peer-to-peer raw LoRa, where the PHY
+carries up to 255 bytes at any spreading factor. A 105-byte signed frame fits
+everywhere. What it cannot afford is the airtime.
+
+### Measured, for one 105-byte endorsement frame
+
+| SF | sensitivity | airtime | frames/h at 1 % | range vs SF10 |
+|---:|---:|---:|---:|---:|
+| 7 | −123.0 dBm | 179 ms | 201 | 0.60× |
+| 8 | −126.0 dBm | 318 ms | 113 | 0.71× |
+| 9 | −129.0 dBm | 574 ms | 62 | 0.84× |
+| **10** | **−132.0 dBm** | **1067 ms** | **33** | **1.00×** |
+| 11 | −134.5 dBm | 2298 ms | 15 | 1.15× |
+| 12 | −137.0 dBm | 4104 ms | 8 | 1.33× |
+
+Sensitivities are the SX1276 datasheet figures. Range is derived from them at
+12 dB per doubling of distance, which is the two-ray far-field exponent over
+water — the same model `sim::phy` uses.
+
+### Why SF12 loses
+
+Each step up buys about 2.5 dB but doubles the symbol time. Over water, where
+loss grows 12 dB per doubling, 5 dB of extra budget is only **1.33× the
+distance** — while costing **3.85× the airtime**.
+
+Relaying wins on both axes:
+
+```
+1 hop  at SF12:  4104 ms, reach 1.33x
+2 hops at SF10:  2134 ms, reach 2.00x
+```
+
+SF12 costs **1.92× more airtime for less reach**. And the duty cycle makes it
+worse than that ratio suggests: at SF12 a node gets 8 frames an hour, so a
+single contested vote at the five-attempt retry ceiling consumes more than half
+of everything it may lawfully transmit — before any position report or
+application message. We already have a scenario where 34 s of prior traffic
+blocks a quorum outright; SF12 would make that the normal case.
+
+Relaying is not new machinery. The protocol already stores and forwards, and the
+signature means a relay cannot alter what it carries.
+
+### What this costs, stated plainly
+
+Relaying needs an intermediate node on the path. Two nodes alone at 1.5× SF10
+range have no relay, and for them SF12 is the only option — at which point the
+duty cycle binds hard and endorsement becomes a several-minute affair. This
+decision says SF10 is the floor for the **design target**, a fleet, not that
+SF12 must be refused if someone configures it.
+
+### Also fixed here
+
+`airtime_ms` applied the low-data-rate optimisation at SF10. The chip enables it
+only where the symbol time passes about 16 ms, which at 125 kHz means SF11 and
+SF12. Every SF10 airtime figure was therefore overstated by about 23 %, and
+airtime is what the duty cycle is spent on.

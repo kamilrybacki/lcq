@@ -56,7 +56,7 @@ is a product decision, not something to resolve quietly in code.
 
 ### Still absent
 
-Real radio hardware, multi-process operation with wall clocks, real radio hardware,
+Real radio hardware, multi-process operation with wall clocks (the spreading-factor question is settled -- see `DECISIONS.md` D2), real radio hardware,
 model-quality coefficients, consultation supplements and evidence provenance.
 
 ### Earlier milestones

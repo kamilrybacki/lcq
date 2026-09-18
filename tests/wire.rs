@@ -174,19 +174,21 @@ fn a_compact_frame_reaches_the_mid_range_spreading_factor() {
 }
 
 #[test]
-fn even_compact_frames_cannot_fit_the_longest_range() {
-    // Honest limit, found by measuring rather than assuming: an ed25519
-    // signature is 64 bytes and the spec forbids truncating it, so 51 bytes at
-    // SF12 cannot hold a self-contained signed vote. Long range needs either a
-    // different signature scheme or an explicit, bounded fragmentation design.
+fn a_compact_frame_fits_a_raw_lora_payload_at_any_spreading_factor() {
+    // This test previously asserted the opposite, on the premise that SF12 is
+    // limited to 51 bytes. That figure is LoRaWAN's DR0 application-payload cap,
+    // not a LoRa PHY limit, and lorai is peer-to-peer raw LoRa. The frame fits
+    // everywhere; what it cannot afford is the airtime. See `DECISIONS.md` D2
+    // and `tests/spreading.rs`, which measure the cost instead of assuming it.
     use lorai::wire::CompactEnvelope;
 
     let signer = SigningKey::from_seed([1; 32]);
     let compact = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1);
     let bytes = encode_compact(&compact.sign(&signer)).expect("encodes");
     assert!(
-        bytes.len() > 51,
-        "if this ever passes, revisit the SF12 claim"
+        bytes.len() <= 255,
+        "compact frame is {} bytes, over the largest LoRa payload",
+        bytes.len()
     );
 }
 

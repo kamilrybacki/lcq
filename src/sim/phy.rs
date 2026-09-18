@@ -23,11 +23,30 @@ pub const ANTENNA_GAIN_DBI: f64 = 2.0;
 /// Transmit power, in dBm. The 14 dBm ERP ceiling of EU 868 MHz sub-band g1.
 pub const TX_POWER_DBM: f64 = 14.0;
 
-/// Receiver sensitivity, in dBm, for SF10 at 125 kHz.
+/// Receiver sensitivity, in dBm, at the default spreading factor.
 ///
 /// Tied to the same profile as [`crate::sim::airtime_ms`]: both describe SF10 /
-/// 125 kHz, and changing the spreading factor must change both together.
-pub const SENSITIVITY_DBM: f64 = -132.0;
+/// 125 kHz, and changing the spreading factor must change both together. Use
+/// [`sensitivity_dbm_at`] to ask about another one.
+pub const SENSITIVITY_DBM: f64 = sensitivity_dbm_at(crate::sim::DEFAULT_SPREADING_FACTOR);
+
+/// Receiver sensitivity, in dBm, for a spreading factor at 125 kHz.
+///
+/// The SX1276 datasheet figures. Each step buys roughly 2.5 dB, which is the
+/// number that decides whether a slower spreading factor is worth its airtime:
+/// over water, where loss grows 12 dB per doubling of distance, 2.5 dB is only
+/// about 1.16x the range.
+#[must_use]
+pub const fn sensitivity_dbm_at(spreading_factor: u8) -> f64 {
+    match spreading_factor {
+        0..=7 => -123.0,
+        8 => -126.0,
+        9 => -129.0,
+        10 => -132.0,
+        11 => -134.5,
+        _ => -137.0,
+    }
+}
 
 const SPEED_OF_LIGHT_MS: f64 = 299_792_458.0;
 
