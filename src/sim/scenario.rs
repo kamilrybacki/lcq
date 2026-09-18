@@ -60,7 +60,8 @@ pub struct TraceEntry {
     pub round: usize,
     /// The member that transmitted.
     pub sender: usize,
-    /// When it started, in milliseconds after the trigger.
+    /// When it started, in milliseconds after the trigger, on one clock that
+    /// runs across the whole run rather than restarting each round.
     pub start_ms: u64,
     /// How long it held the channel.
     pub airtime_ms: u64,
@@ -220,6 +221,28 @@ impl Scenario {
         self.fleet
     }
 
+    /// Spacing between members along the line, in metres, when geometry is on.
+    ///
+    /// `None` means distance is not modelled: every node is assumed equally
+    /// audible, so there are no positions to speak of and nothing may be drawn
+    /// as if there were.
+    #[must_use]
+    pub const fn spacing_m(&self) -> Option<f64> {
+        self.spacing_m
+    }
+
+    /// The contention window for a retry round, in milliseconds.
+    #[must_use]
+    pub const fn window_ms(round: usize) -> u64 {
+        let shift: u32 = match round {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 3,
+        };
+        Self::CONTENTION_WINDOW_MS << shift
+    }
+
     /// Run the scenario to completion.
     ///
     /// # Panics
@@ -303,6 +326,11 @@ struct Run<'a> {
     tally: Tally,
     used_airtime: Vec<u64>,
     verified: Vec<String>,
+    /// Milliseconds since the trigger. Rounds are laid end to end: a round runs
+    /// for its contention window plus the longest frame started inside it, so
+    /// the last transmission finishes before the next round opens. That is what
+    /// the collision model already assumes by evaluating one round at a time.
+    elapsed_ms: u64,
 }
 
 impl<'a> Run<'a> {
@@ -316,6 +344,7 @@ impl<'a> Run<'a> {
             tally: Tally::default(),
             used_airtime: alloc::vec![scenario.prior_airtime_ms; scenario.fleet],
             verified: Vec::new(),
+            elapsed_ms: 0,
         }
     }
 
@@ -332,6 +361,13 @@ impl<'a> Run<'a> {
         }
         let on_air = self.schedule(round, window, pending, &mut retry);
         self.deliver(round, &on_air, &mut retry);
+
+        let tail = on_air
+            .iter()
+            .map(|(_, frame)| frame.end_ms())
+            .max()
+            .unwrap_or(self.elapsed_ms);
+        self.elapsed_ms = tail.max(self.elapsed_ms + window);
         retry
     }
 
@@ -345,7 +381,11 @@ impl<'a> Run<'a> {
         }
         let air = airtime_ms(self.frames[OBSERVER].len());
         let charged = self.tally.charge(&mut self.used_airtime, OBSERVER, air, 0);
-        let start = if charged { self.rng.below(window) } else { 0 };
+        let start = if charged {
+            self.elapsed_ms + self.rng.below(window)
+        } else {
+            0
+        };
         if charged {
             self.tally
                 .on_air
@@ -385,7 +425,7 @@ impl<'a> Run<'a> {
                 // back inside the scenario's horizon.
                 continue;
             }
-            let start = self.rng.below(window);
+            let start = self.elapsed_ms + self.rng.below(window);
             if self
                 .scenario
                 .topology

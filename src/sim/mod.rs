@@ -35,8 +35,8 @@ pub use medium::{
 };
 pub use phy::{
     ANTENNA_GAIN_DBI, CARRIER_HZ, Link, MAST_HEIGHT_M, MAX_FADE_DB, MIN_FADE_DB, RicianFading,
-    SENSITIVITY_DBM, TX_POWER_DBM, breakpoint_m, path_loss_db, radio_horizon_m, rssi_dbm,
-    sensitivity_dbm_at,
+    SENSITIVITY_DBM, TX_POWER_DBM, breakpoint_m, max_range_m, path_loss_db, radio_horizon_m,
+    rssi_dbm, sensitivity_dbm_at,
 };
 pub use rng::Rng;
 pub use scenario::{Outcome, Report, Scenario, TraceEntry};

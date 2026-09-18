@@ -97,6 +97,30 @@ fn free_space_db(distance_m: f64) -> f64 {
     20.0 * (4.0 * core::f64::consts::PI * distance_m / wavelength).log10()
 }
 
+/// The furthest a link still decodes, in metres.
+///
+/// Found by bisection rather than algebra because the loss model has two
+/// regimes and a hard horizon, and a closed form would have to special-case
+/// both. Returns the horizon when the link budget outlasts the geometry, which
+/// over water it does: the curvature runs out before the signal does.
+#[must_use]
+pub fn max_range_m(tx_power_dbm: f64) -> f64 {
+    let horizon = radio_horizon_m();
+    if rssi_dbm(&Link::new(horizon - 1.0), tx_power_dbm) >= SENSITIVITY_DBM {
+        return horizon;
+    }
+    let (mut near, mut far) = (1.0f64, horizon);
+    for _ in 0..60 {
+        let middle = f64::midpoint(near, far);
+        if rssi_dbm(&Link::new(middle), tx_power_dbm) >= SENSITIVITY_DBM {
+            near = middle;
+        } else {
+            far = middle;
+        }
+    }
+    near
+}
+
 /// One radio path, identified by the distance it has to cross.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Link {

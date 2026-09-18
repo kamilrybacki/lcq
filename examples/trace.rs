@@ -1,20 +1,34 @@
 //! Dump simulation runs as JSON, for inspection or visualisation.
 //!
-//! Everything printed here comes from an actual run of [`Scenario::run`]. The
-//! JSON is written by hand rather than with a serialiser, because one example
-//! binary is not worth a dependency.
+//! Everything printed here comes from an actual run of [`Scenario::run`]. Times
+//! are milliseconds since the trigger, on one clock across the whole run, so a
+//! consumer can replay a scenario rather than only chart it. The JSON is written
+//! by hand rather than with a serialiser, because one example binary is not
+//! worth a dependency.
 
 use lorai::sim::{
     ANTENNA_GAIN_DBI, DUTY_CYCLE_BUDGET_MS, Outcome, SENSITIVITY_DBM, Scenario, TX_POWER_DBM,
-    Topology, TraceEntry, airtime_ms_at, breakpoint_m, path_loss_db, radio_horizon_m,
+    Topology, TraceEntry, airtime_ms_at, breakpoint_m, max_range_m, path_loss_db, radio_horizon_m,
     sensitivity_dbm_at,
 };
 
 /// A signed, compacted endorsement frame.
 const FRAME_BYTES: usize = 105;
 
+/// Loss per doubling of distance in the two-ray far field over water.
+const DB_PER_DOUBLING: f64 = 12.04;
+
 fn main() {
-    let cases: Vec<(&str, Scenario)> = vec![
+    println!("{{");
+    print_radio();
+    print_path_loss();
+    print_spreading();
+    print_scenarios(&cases());
+    println!("}}");
+}
+
+fn cases() -> Vec<(&'static str, Scenario)> {
+    vec![
         ("5 wezlow, bez strat", Scenario::new(5)),
         ("10 wezlow, bez strat", Scenario::new(10)),
         (
@@ -47,25 +61,31 @@ fn main() {
             "10 wezlow, konwoj 5 km",
             Scenario::new(10).with_spacing_m(5_000.0).with_seed(11),
         ),
-    ];
+    ]
+}
 
-    println!("{{");
+fn print_radio() {
     println!("  \"horizonM\": {:.0},", radio_horizon_m());
     println!("  \"breakpointM\": {:.0},", breakpoint_m());
+    println!("  \"rangeM\": {:.0},", max_range_m(TX_POWER_DBM));
     println!("  \"sensitivityDbm\": {SENSITIVITY_DBM},");
     println!(
         "  \"eirpDbm\": {:.0},",
         TX_POWER_DBM + 2.0 * ANTENNA_GAIN_DBI
     );
+    println!("  \"frameBytes\": {FRAME_BYTES},");
+}
+
+fn print_path_loss() {
     print!("  \"pathLoss\": [");
-    let mut first = true;
     let mut distance = 100.0_f64;
+    let mut first = true;
     while distance < 40_000.0 {
-        let loss = path_loss_db(distance);
         if !first {
             print!(", ");
         }
         first = false;
+        let loss = path_loss_db(distance);
         if loss.is_finite() {
             print!("[{distance:.0}, {loss:.2}]");
         } else {
@@ -74,13 +94,14 @@ fn main() {
         distance *= 1.15;
     }
     println!("],");
+}
 
-    // Every spreading factor, so the page cannot drift from the crate.
+fn print_spreading() {
     print!("  \"spreading\": [");
     let reference = sensitivity_dbm_at(10);
     for sf in 7..=12u8 {
         let air = airtime_ms_at(sf, FRAME_BYTES);
-        let reach = 2f64.powf((reference - sensitivity_dbm_at(sf)) / 12.04);
+        let reach = 2f64.powf((reference - sensitivity_dbm_at(sf)) / DB_PER_DOUBLING);
         if sf > 7 {
             print!(", ");
         }
@@ -91,15 +112,29 @@ fn main() {
         );
     }
     println!("],");
-    println!("  \"frameBytes\": {FRAME_BYTES},");
+}
 
+fn print_scenarios(cases: &[(&str, Scenario)]) {
     println!("  \"scenarios\": [");
     for (index, (name, scenario)) in cases.iter().enumerate() {
         let report = scenario.run();
+        let duration = report
+            .timeline
+            .iter()
+            .map(|f| f.start_ms + f.airtime_ms)
+            .max()
+            .unwrap_or(0);
         let comma = if index + 1 == cases.len() { "" } else { "," };
+
         println!("    {{");
         println!("      \"name\": \"{name}\",");
         println!("      \"fleet\": {},", scenario.fleet());
+        match scenario.spacing_m() {
+            // Null is not "zero metres apart": it means distance is not
+            // modelled at all, so a consumer must not draw positions.
+            None => println!("      \"spacingM\": null,"),
+            Some(spacing) => println!("      \"spacingM\": {spacing:.0},"),
+        }
         println!("      \"endorsed\": {},", report.endorsed);
         println!("      \"supporters\": {},", report.binding_supporters);
         println!("      \"threshold\": {},", report.min_signers);
@@ -109,6 +144,15 @@ fn main() {
         println!("      \"rejected\": {},", report.rejected_frames);
         println!("      \"dutyBlocked\": {},", report.duty_cycle_blocked);
         println!("      \"airtimeMs\": {},", report.airtime_ms);
+        println!("      \"durationMs\": {duration},");
+        print!("      \"windowsMs\": [");
+        for round in 0..5usize {
+            if round > 0 {
+                print!(", ");
+            }
+            print!("{}", Scenario::window_ms(round));
+        }
+        println!("],");
         println!("      \"timeline\": [");
         let last = report.timeline.len().saturating_sub(1);
         for (at, entry) in report.timeline.iter().enumerate() {
@@ -119,7 +163,6 @@ fn main() {
         println!("    }}{comma}");
     }
     println!("  ]");
-    println!("}}");
 }
 
 fn frame_json(entry: &TraceEntry) -> String {
