@@ -8,6 +8,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod application;
 pub mod domain;
+pub mod infrastructure;
+pub mod wire;
 
 pub use domain::quorum::{EvaluationError, Policy, PolicyError, QuorumResult, evaluate};
