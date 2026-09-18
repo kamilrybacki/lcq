@@ -173,3 +173,24 @@ fn the_physical_effects_are_deterministic_for_a_seed() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn capture_saves_frames_that_uniform_signal_strength_would_lose() {
+    // The same fleet, the same seed, the same start times — the only difference
+    // is that geometry gives the nodes different received strengths, so a near
+    // member can be demodulated through a distant one's transmission. Without
+    // the spread nothing can ever capture and every overlap destroys both.
+    let flat = Scenario::new(10).with_seed(11).run();
+    let spread = Scenario::new(10)
+        .with_spacing_m(2_000.0)
+        .with_seed(11)
+        .run();
+    assert_eq!(spread.too_weak_frames, 0, "2 km links are comfortable");
+    assert!(
+        spread.collided_frames < flat.collided_frames,
+        "capture must save at least one frame: {} with geometry against {} without",
+        spread.collided_frames,
+        flat.collided_frames
+    );
+    assert!(spread.endorsed && flat.endorsed);
+}
