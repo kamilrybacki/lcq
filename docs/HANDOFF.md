@@ -1,6 +1,41 @@
 # Handoff — Claude Code / next implementer
 
-## State at 2026-09-18 (M1 implemented, awaiting user review)
+## State at 2026-09-18 (M1 + M2 implemented, awaiting user review)
+
+### M2 — logical contracts and positive-only state machine
+
+Implemented. The gate required approving five things; the design spec settles
+four of them, and the fifth was chosen and is flagged as an assumption:
+
+| gate item | resolution | source |
+|---|---|---|
+| subject identity | mission + event + revision + content hash | spec §7, plus subtlety 4: the upstream `Event.id` is a *local* identity |
+| revision / namespace | revision scoped to the subject; no cross-revision or cross-hash aggregation | spec §6 |
+| timing authority | every deadline derives from the shared `evaluation_started_at` carried with the subject, never from local arrival | spec §6 |
+| clock error | **±30 s — assumption, not user-approved.** A tenth of the 5-minute cutoff, enforced by a compile-time assertion | spec says "bounded" without a number |
+| late node | records nothing into a frozen consultation; never fabricates a completed independent phase | roadmap recommendation + spec §6 |
+
+Files: `src/domain/time/`, `src/domain/contracts/`, `src/domain/state/`, and
+`tests/time.rs`, `tests/contracts.rs`, `tests/state.rs`.
+
+The roadmap's acceptance list is encoded directly as tests: opinions are not
+votes, stages do not aggregate, the cutoff freezes exactly once, expiry is
+checked before everything else, a conflict on one subject cannot veto another,
+a node votes at most once, and a healthy unanimous trace reaches endorsement.
+
+Two design points worth re-reading before M3:
+
+1. **Uncertainty is a third answer.** `Clock` reports certainly-before,
+   certainly-after, or neither. A node inside the skew band refuses a binding
+   vote rather than guessing — and refusing to vote is not deciding there is no
+   danger.
+2. **A disputing binding vote is recorded but never counted.** It consumes the
+   author's one vote so they cannot vote again, and contributes nothing to any
+   threshold.
+
+Still absent, unchanged: authentication, wire format, persistence, radio.
+
+### M1 — quorum policy
 
 M1 is implemented and verified. Two things in the original plan were changed by
 the user, both engineering proposals rather than product decisions:
@@ -21,7 +56,7 @@ All product decisions in this document are unchanged.
 
 | command | result |
 |---|---|
-| `cargo test` | 21 passed (10 policy, 8 evaluation, 3 property) |
+| `cargo test` | 49 passed (10 policy, 8 evaluation, 3 property, 10 contracts, 13 state, 5 time) |
 | `cargo clippy --all-targets -- -D warnings` | clean at `pedantic` |
 | `cargo fmt --check` | clean |
 | `cargo build --release` | builds |
@@ -47,7 +82,8 @@ Passing tests are an arithmetic oracle, not a Byzantine safety proof.
 
 ### Next gate
 
-M2, after user review. Do not start it unprompted.
+M3 (durable identity, active state, outbox), after user review. Its gate
+requires approving SQLite transaction ordering and the failure model.
 
 ## Original state at 2026-09-18
 
