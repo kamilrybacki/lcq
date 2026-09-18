@@ -1,6 +1,55 @@
 # Handoff — Claude Code / next implementer
 
-## State at 2026-09-18
+## State at 2026-09-18 (M1 implemented, awaiting user review)
+
+M1 is implemented and verified. Two things in the original plan were changed by
+the user, both engineering proposals rather than product decisions:
+
+- **Language: Rust, not Python.** Chosen for the actual constraints rather than
+  benchmark speed: a LoRa payload is 51-222 bytes so wire compactness decides
+  whether a message fits at all; a GC pause inside a transmit window costs a
+  frame; and `no_std` keeps the door open if a node moves from a Pi to a
+  microcontroller. Toolchain: rustc/cargo 1.97, edition 2024, `proptest` as the
+  only dev dependency, no runtime dependencies.
+- **Layout: DDD.** `src/domain/quorum/` holds the rules; the domain layer may
+  not import a transport, a store or a clock. Later milestones add application
+  and infrastructure layers beside it rather than inside it.
+
+All product decisions in this document are unchanged.
+
+### Verified, with the commands actually run
+
+| command | result |
+|---|---|
+| `cargo test` | 21 passed (10 policy, 8 evaluation, 3 property) |
+| `cargo clippy --all-targets -- -D warnings` | clean at `pedantic` |
+| `cargo fmt --check` | clean |
+| `cargo build --release` | builds |
+
+Two real defects were caught by `clippy::pedantic` and fixed, not silenced:
+
+1. `min_signers` computed `(size + max_faulty) / 2 + 1`, which can overflow.
+   Overflow in a safety threshold would silently produce a bar far below the one
+   the fleet agreed to. Now `usize::midpoint`.
+2. Manifest validation and `max_faulty` could panic via `expect`. A panic in a
+   node at sea is not an acceptable failure mode; both are now total.
+
+The property-test oracle deliberately keeps the longhand arithmetic and carries
+an `allow` for the same lint: an oracle that borrows the implementation's helper
+inherits the implementation's bug instead of catching it.
+
+### What M1 still is not
+
+Unchanged from the plan, and worth repeating because the code now looks
+finished: no authentication, no wire format, no persistence, no radio, no
+consultation, no model weights. `evaluate` takes signer IDs entirely on trust.
+Passing tests are an arithmetic oracle, not a Byzantine safety proof.
+
+### Next gate
+
+M2, after user review. Do not start it unprompted.
+
+## Original state at 2026-09-18
 
 - GitHub: https://github.com/kamilrybacki/lorai.git
 - Local checkout used to prepare this handoff: `/home/kamil-rybacki/Code/lorai`.
