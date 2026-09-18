@@ -18,4 +18,7 @@ mod crypto;
 
 pub use codec::{Envelope, SignedEnvelope, decode, encode};
 pub use compact::{CompactEnvelope, SignedCompactEnvelope, decode_compact, encode_compact};
-pub use crypto::{GroupKey, SigningKey, VerifyingKey, WireError, open, seal};
+pub use crypto::{
+    FRAME_HEADER_BYTES, GroupKey, SigningKey, VerifyingKey, WireError, open, open_frame, seal,
+    seal_frame,
+};

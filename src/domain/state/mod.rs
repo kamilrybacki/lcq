@@ -60,6 +60,57 @@ impl fmt::Display for TransitionError {
 
 impl core::error::Error for TransitionError {}
 
+/// How many times the state machine said no, and why.
+///
+/// A simulator that drops refusals on the floor cannot tell a fleet that agreed
+/// from one whose utterances were all rejected for the same silly reason. This
+/// makes every refusal show up in a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TransitionErrorCount {
+    /// Utterances about a different subject, revision or content.
+    pub different_subject: usize,
+    /// Stage did not belong to the phase the case was in.
+    pub wrong_stage_for_phase: usize,
+    /// Arrived after the consultation set was frozen.
+    pub consultation_closed: usize,
+    /// Consultation could not close because the cutoff had not certainly passed.
+    pub cutoff_not_reached: usize,
+    /// The subject had certainly expired.
+    pub expired: usize,
+    /// Clock skew left validity genuinely unknown.
+    pub time_uncertain: usize,
+    /// The author had already cast a binding vote.
+    pub already_voted: usize,
+}
+
+impl TransitionErrorCount {
+    /// Tally one refusal.
+    pub const fn record(&mut self, error: TransitionError) {
+        let slot = match error {
+            TransitionError::DifferentSubject => &mut self.different_subject,
+            TransitionError::WrongStageForPhase => &mut self.wrong_stage_for_phase,
+            TransitionError::ConsultationClosed => &mut self.consultation_closed,
+            TransitionError::CutoffNotReached => &mut self.cutoff_not_reached,
+            TransitionError::Expired => &mut self.expired,
+            TransitionError::TimeUncertain => &mut self.time_uncertain,
+            TransitionError::AlreadyVoted => &mut self.already_voted,
+        };
+        *slot += 1;
+    }
+
+    /// Every refusal, whatever the reason.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.different_subject
+            + self.wrong_stage_for_phase
+            + self.consultation_closed
+            + self.cutoff_not_reached
+            + self.expired
+            + self.time_uncertain
+            + self.already_voted
+    }
+}
+
 /// Which part of its life a case is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {

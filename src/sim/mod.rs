@@ -33,6 +33,7 @@
 mod channel;
 mod medium;
 mod phy;
+mod protocol;
 mod rng;
 mod scenario;
 
@@ -46,5 +47,6 @@ pub use phy::{
     SENSITIVITY_DBM, TX_POWER_DBM, breakpoint_m, max_range_m, path_loss_db, radio_horizon_m,
     rssi_dbm, sensitivity_dbm_at,
 };
+pub use protocol::{Deliberation, DeliberationReport, StageReport};
 pub use rng::Rng;
 pub use scenario::{Access, Acknowledgement, Outcome, Report, Scenario, TraceEntry};

@@ -23,7 +23,7 @@ fn main() {
     .sign(&SigningKey::from_seed([1; 32]));
 
     let plain = encode(&signed).expect("encodes");
-    let sealed = seal(&GroupKey::from_bytes([9; 32]), 4_242, &plain).expect("seals");
+    let sealed = seal(&GroupKey::from_bytes([9; 32]), 0, 4_242, &plain).expect("seals");
 
     println!("core frame        : {} B", plain.len());
     println!("sealed (AEAD +16) : {} B", sealed.len());
@@ -55,7 +55,7 @@ fn main() {
     .sign(&SigningKey::from_seed([1; 32]));
     let compact_bytes = encode_compact(&compact).expect("encodes");
     let compact_sealed =
-        seal(&GroupKey::from_bytes([9; 32]), 4_242, &compact_bytes).expect("seals");
+        seal(&GroupKey::from_bytes([9; 32]), 0, 4_242, &compact_bytes).expect("seals");
 
     println!();
     println!("--- forma zwarta (indeksy manifestu) ---");

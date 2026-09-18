@@ -89,8 +89,8 @@ fn group_encryption_round_trips() {
     let signer = SigningKey::from_seed([1; 32]);
     let plaintext = encode(&envelope("node-a").sign(&signer)).expect("encodes");
 
-    let sealed = seal(&key, 42, &plaintext).expect("seals");
-    let opened = open(&key, 42, &sealed).expect("opens");
+    let sealed = seal(&key, 3, 42, &plaintext).expect("seals");
+    let opened = open(&key, 3, 42, &sealed).expect("opens");
     assert_eq!(opened, plaintext);
 }
 
@@ -99,18 +99,18 @@ fn a_wrong_sequence_fails_to_open() {
     // The sequence number is the nonce and is bound as associated data, so a
     // replayed frame cannot be passed off under a different sequence.
     let key = GroupKey::from_bytes([9; 32]);
-    let sealed = seal(&key, 42, b"payload").expect("seals");
+    let sealed = seal(&key, 3, 42, b"payload").expect("seals");
     assert_eq!(
-        open(&key, 43, &sealed).unwrap_err(),
+        open(&key, 3, 43, &sealed).unwrap_err(),
         WireError::DecryptionFailed
     );
 }
 
 #[test]
 fn a_wrong_group_key_fails_to_open() {
-    let sealed = seal(&GroupKey::from_bytes([9; 32]), 1, b"payload").expect("seals");
+    let sealed = seal(&GroupKey::from_bytes([9; 32]), 3, 1, b"payload").expect("seals");
     assert_eq!(
-        open(&GroupKey::from_bytes([8; 32]), 1, &sealed).unwrap_err(),
+        open(&GroupKey::from_bytes([8; 32]), 3, 1, &sealed).unwrap_err(),
         WireError::DecryptionFailed
     );
 }
@@ -118,10 +118,10 @@ fn a_wrong_group_key_fails_to_open() {
 #[test]
 fn a_flipped_ciphertext_bit_fails_to_open() {
     let key = GroupKey::from_bytes([9; 32]);
-    let mut sealed = seal(&key, 1, b"payload").expect("seals");
+    let mut sealed = seal(&key, 3, 1, b"payload").expect("seals");
     sealed[0] ^= 0x01;
     assert_eq!(
-        open(&key, 1, &sealed).unwrap_err(),
+        open(&key, 3, 1, &sealed).unwrap_err(),
         WireError::DecryptionFailed
     );
 }
@@ -165,7 +165,7 @@ fn a_compact_frame_reaches_the_mid_range_spreading_factor() {
         4_242,
     );
     let bytes = encode_compact(&compact.sign(&signer)).expect("encodes");
-    let sealed = seal(&GroupKey::from_bytes([9; 32]), 4_242, &bytes).expect("seals");
+    let sealed = seal(&GroupKey::from_bytes([9; 32]), 3, 4_242, &bytes).expect("seals");
     assert!(
         sealed.len() <= 133,
         "compact sealed frame is {} B, over the SF10 limit",
@@ -193,3 +193,61 @@ fn a_compact_frame_fits_a_raw_lora_payload_at_any_spreading_factor() {
 }
 
 use lorai::wire::encode_compact;
+
+#[test]
+fn two_members_counting_from_zero_do_not_share_a_nonce() {
+    // The group key is shared but each member counts its own sequence, so
+    // without the author index in the nonce the first frame of any two members
+    // would seal under identical keystream. The XOR of the ciphertexts would
+    // then be the XOR of the plaintexts, which is total loss of confidentiality
+    // and hands over the Poly1305 key as well.
+    use lorai::wire::{GroupKey, seal};
+
+    let group = GroupKey::from_bytes([0x5a; 32]);
+    let a = seal(&group, 0, 0, b"aaaaaaaaaaaaaaaaaaaa").expect("seals");
+    let b = seal(&group, 1, 0, b"bbbbbbbbbbbbbbbbbbbb").expect("seals");
+
+    let cipher_xor: Vec<u8> = a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect();
+    let plain_xor: Vec<u8> = b"aaaaaaaaaaaaaaaaaaaa"
+        .iter()
+        .zip(b"bbbbbbbbbbbbbbbbbbbb".iter())
+        .map(|(x, y)| x ^ y)
+        .collect();
+    assert_ne!(cipher_xor[..20], plain_xor[..20]);
+}
+
+#[test]
+fn a_frame_taken_off_the_air_can_be_opened_without_prior_knowledge() {
+    // The nonce cannot live inside the thing it decrypts. A receiver holding
+    // only the group key and the bytes must be able to open the frame.
+    use lorai::wire::{GroupKey, open_frame, seal_frame};
+
+    let group = GroupKey::from_bytes([0x5a; 32]);
+    let frame = seal_frame(&group, 7, 12_345, b"binding support").expect("seals");
+    let (author, sequence, plaintext) = open_frame(&group, &frame).expect("opens");
+    assert_eq!(author, 7);
+    assert_eq!(sequence, 12_345);
+    assert_eq!(plaintext, b"binding support");
+}
+
+#[test]
+fn altering_the_cleartext_header_breaks_the_frame() {
+    // The header is associated data, so it is authenticated even though it is
+    // readable. Rewriting it in flight destroys the frame rather than
+    // redirecting it.
+    use lorai::wire::{GroupKey, open_frame, seal_frame};
+
+    let group = GroupKey::from_bytes([0x5a; 32]);
+    let mut frame = seal_frame(&group, 7, 12_345, b"binding support").expect("seals");
+    frame[1] ^= 0x01;
+    assert!(open_frame(&group, &frame).is_err());
+}
+
+#[test]
+fn a_frame_shorter_than_its_header_is_refused_not_guessed() {
+    use lorai::wire::{FRAME_HEADER_BYTES, GroupKey, open_frame};
+
+    let group = GroupKey::from_bytes([0x5a; 32]);
+    assert!(open_frame(&group, &[0u8; FRAME_HEADER_BYTES]).is_err());
+    assert!(open_frame(&group, &[]).is_err());
+}
