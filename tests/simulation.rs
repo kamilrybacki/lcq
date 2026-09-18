@@ -76,3 +76,100 @@ fn airtime_is_accounted_for_every_frame() {
     assert!(report.airtime_ms > 0);
     assert!(report.frames_sent > 0);
 }
+
+#[test]
+fn an_unprompted_simultaneous_reply_loses_frames_to_collisions() {
+    // Every member answers the same trigger on one channel. Without a spread of
+    // start times they would talk over each other completely; with one, some
+    // still overlap. The cost is visible as extra frames, and a run that sent
+    // exactly one frame per member would mean the channel was not modelled.
+    let report = Scenario::new(10).run();
+    assert!(report.collided_frames > 0, "a contended round must collide");
+    assert!(
+        report.frames_sent > 10,
+        "collided frames must be retransmitted, got {}",
+        report.frames_sent
+    );
+}
+
+#[test]
+fn backoff_converges_despite_the_first_round_colliding() {
+    // The point of doubling the window: a collided round must not reproduce its
+    // own pile-up. Endorsement still lands.
+    let report = Scenario::new(10).run();
+    assert!(report.endorsed);
+    assert!(report.binding_supporters >= report.min_signers);
+}
+
+#[test]
+fn the_hourly_airtime_budget_can_block_a_quorum() {
+    // 34 s of the 36 s allowance already spent on other traffic. The radio is
+    // fine and the fleet is honest; the regulation is what stops the vote.
+    // Blocking is the correct outcome — the alternative is transmitting
+    // unlawfully or counting members who never spoke.
+    let report = Scenario::new(10).with_prior_airtime_ms(34_000).run();
+    assert!(report.duty_cycle_blocked > 0, "the budget must bite");
+    assert!(report.binding_supporters < report.min_signers);
+    assert!(!report.endorsed);
+}
+
+#[test]
+fn a_fleet_with_budget_to_spare_is_not_blocked_by_duty_cycle() {
+    let report = Scenario::new(10).run();
+    assert_eq!(report.duty_cycle_blocked, 0);
+}
+
+#[test]
+fn a_close_convoy_is_fully_audible() {
+    let report = Scenario::new(10).with_spacing_m(500.0).with_seed(11).run();
+    assert_eq!(report.too_weak_frames, 0, "500 m is a comfortable link");
+    assert!(report.endorsed);
+}
+
+#[test]
+fn distance_drops_members_out_of_the_quorum() {
+    // The same fleet strung out far enough that its tail is past the radio
+    // horizon. Those members transmit, pay the airtime and are never heard.
+    let report = Scenario::new(10)
+        .with_spacing_m(5_000.0)
+        .with_seed(11)
+        .run();
+    assert!(report.too_weak_frames > 0, "the tail must be inaudible");
+    assert!(
+        report.binding_supporters < report.min_signers,
+        "got {} supporters against a threshold of {}",
+        report.binding_supporters,
+        report.min_signers
+    );
+    assert!(!report.endorsed);
+    assert!(
+        report.airtime_ms > 0,
+        "unheard members still spend their airtime; they get no acknowledgement"
+    );
+}
+
+#[test]
+fn geometry_lets_a_near_member_capture_over_a_distant_one() {
+    use lorai::sim::{Link, Reception, TX_POWER_DBM, Transmission, receive, rssi_dbm};
+
+    let near = Transmission::new(0, 1_500, rssi_dbm(&Link::new(1_000.0), TX_POWER_DBM));
+    let far = Transmission::new(700, 1_500, rssi_dbm(&Link::new(15_000.0), TX_POWER_DBM));
+    assert_eq!(
+        receive(&near, &[far]),
+        Reception::Decoded,
+        "the near station is far more than the capture margin ahead"
+    );
+    assert_eq!(receive(&far, &[near]), Reception::Collided);
+}
+
+#[test]
+fn the_physical_effects_are_deterministic_for_a_seed() {
+    let run = || {
+        Scenario::new(10)
+            .with_loss(0.4)
+            .with_spacing_m(3_000.0)
+            .with_seed(99)
+            .run()
+    };
+    assert_eq!(run(), run());
+}

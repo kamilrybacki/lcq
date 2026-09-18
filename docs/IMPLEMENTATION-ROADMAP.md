@@ -22,7 +22,7 @@ Acceptance: opinions do not count as binding votes; stage isolation; no cross-ve
 
 Proposed files: `src/lorai/storage.py`, `tests/test_storage.py`, `tests/test_crash_recovery.py`.
 
-Gate: approve SQLite transaction ordering and failure model, including disk full, DB restore/rollback and incomplete writes. SQLite durability settings and recovery assumptions must be explicit.
+Gate: approve append-only journal ordering and failure model, including disk full, partial-record tails and recovery truncation. Durability settings and recovery assumptions must be explicit. SQLite was rejected for this role -- see `DECISIONS.md` D1.
 
 Deliverable: durable mission context, monotonically reserved sequence numbers, binding-vote locks, consultation state, received message identities, bounded replay state, active subjects and outgoing bytes. A transaction must reserve safety state before exposing a packet to transmission. Outbox consumers are idempotent.
 
@@ -64,7 +64,7 @@ Proposed files: `src/lorai/runtime.py`, `tests/integration/`, `examples/isolated
 
 Gate: define least-privilege process/container layout and prove the only inter-node data path is the simulated radio. No Docker socket in participants; no shared participant state directories; no host-network bypass. Resource caps include the runtime and observer instrumentation.
 
-Deliverable: multiple real processes running the same state machine with wall clocks and per-node SQLite; thin adapter to a channel emulator; restart/kill tests and machine-readable logs. Application MQTT/HTTP integration is exercised by a coordinated, separately authorized milestone in `morsik-lora`, not added as a core dependency here.
+Deliverable: multiple real processes running the same state machine with wall clocks and a per-node append-only journal; thin adapter to a channel emulator; restart/kill tests and machine-readable logs. Application MQTT/HTTP integration is exercised by a coordinated, separately authorized milestone in `morsik-lora`, not added as a core dependency here.
 
 Acceptance: actual process crash/restart, unreachable local broker in the integration, repeated deliveries, bounded RSS/CPU/storage, demonstrable network isolation, no unintended IP inter-node path. Faster virtual tests alone do not satisfy this gate.
 
