@@ -139,6 +139,9 @@ pub struct Deliberation {
     access: Access,
     anchor: SlotAnchor,
     clock_skew_s: u64,
+    disputers: usize,
+    forgers: usize,
+    validity_s: Option<u64>,
 }
 
 impl Deliberation {
@@ -161,6 +164,9 @@ impl Deliberation {
             access: Access::Random,
             anchor: SlotAnchor::Trigger,
             clock_skew_s: 0,
+            disputers: 0,
+            forgers: 0,
+            validity_s: None,
         }
     }
 
@@ -225,6 +231,31 @@ impl Deliberation {
         self
     }
 
+    /// Members that cast a binding vote AGAINST the claim.
+    ///
+    /// A dispute is recorded so its author cannot vote again, and it never
+    /// counts toward a threshold. There is no fleet verdict meaning "no
+    /// danger": the absence of approval is not safety.
+    #[must_use]
+    pub const fn with_disputers(mut self, disputers: usize) -> Self {
+        self.disputers = disputers;
+        self
+    }
+
+    /// Members that sign as somebody else.
+    #[must_use]
+    pub const fn with_forgers(mut self, forgers: usize) -> Self {
+        self.forgers = forgers;
+        self
+    }
+
+    /// Open the case with an explicit validity instead of the default.
+    #[must_use]
+    pub const fn with_validity_s(mut self, validity_s: u64) -> Self {
+        self.validity_s = Some(validity_s);
+        self
+    }
+
     /// Run the whole deliberation: consult, freeze, vote.
     ///
     /// # Panics
@@ -247,7 +278,10 @@ impl Deliberation {
 
         let mut journals: Vec<MemoryJournal> =
             (0..self.fleet).map(|_| MemoryJournal::default()).collect();
-        let mut observer = Case::open(subject.clone());
+        let mut observer = match self.validity_s {
+            None => Case::open(subject.clone()),
+            Some(seconds) => Case::open_until(subject.clone(), started_at.plus_secs(seconds)),
+        };
         let mut rng = Rng::new(self.seed);
         let mut fading = RicianFading::new(self.seed ^ 0x9E37_79B9_7F4A_7C15, RICIAN_K_DB);
         let mut used_airtime: Vec<u64> = alloc::vec![0; self.fleet];
@@ -428,9 +462,16 @@ impl Deliberation {
                     bytes
                 } else {
                     {
-                        let Some(built) =
-                            Self::frame_for(sender, stage, subject, keys, group, journals)
-                        else {
+                        let Some(built) = Self::frame_for(
+                            sender,
+                            stage,
+                            self.verdict_of(sender),
+                            self.is_forger(sender),
+                            subject,
+                            keys,
+                            group,
+                            journals,
+                        ) else {
                             // The journal refused: the lock is held from an
                             // earlier case, or nothing could be made durable.
                             continue;
@@ -502,7 +543,7 @@ impl Deliberation {
                         retry.push(*sender);
                     }
                     Reception::Decoded => {
-                        match Self::admit(bytes, stage, subject, manifest, group, observer, clock) {
+                        match Self::admit(bytes, subject, manifest, group, observer, clock) {
                             Ok(()) => report.admitted += 1,
                             Err(error) => {
                                 report.refused += 1;
@@ -530,9 +571,12 @@ impl Deliberation {
     ///
     /// Returns `None` when the journal refuses, which for a binding vote is the
     /// lock doing its job.
+    #[allow(clippy::too_many_arguments)]
     fn frame_for(
         sender: usize,
         stage: Stage,
+        verdict: Verdict,
+        forger: bool,
         subject: &Subject,
         keys: &[SigningKey],
         group: &GroupKey,
@@ -548,10 +592,18 @@ impl Deliberation {
             subject.started_at().as_secs(),
             author,
             stage_code(stage),
-            verdict_code(Verdict::Support),
+            verdict_code(verdict),
             sequence,
         );
-        let signed = encode_compact(&envelope.sign(&keys[sender])).ok()?;
+        // A forger holds the group key but signs with a key the manifest lists
+        // for somebody else. Decryption is membership; the signature is
+        // authorship, and only the second one a quorum counts.
+        let signing = if forger {
+            &keys[(sender + 1) % keys.len()]
+        } else {
+            &keys[sender]
+        };
+        let signed = encode_compact(&envelope.sign(signing)).ok()?;
         // What actually goes on the air is sealed under the group key. Modelling
         // the unsealed frame understates every airtime figure by its overhead.
         let sealed = seal_frame(group, author, sequence, &signed).ok()?;
@@ -573,7 +625,6 @@ impl Deliberation {
     /// Open, verify and offer one received frame to the observer's state machine.
     fn admit(
         sealed: &[u8],
-        stage: Stage,
         subject: &Subject,
         manifest: &[VerifyingKey],
         group: &GroupKey,
@@ -594,12 +645,17 @@ impl Deliberation {
         if claimed >= manifest.len() || received.verify(&manifest[claimed]).is_err() {
             return Err(TransitionError::DifferentSubject);
         }
-        let opinion = Opinion::new(
-            &member_id(claimed),
-            subject.clone(),
-            stage,
-            Verdict::Support,
-        );
+        // Read the stage and verdict FROM THE FRAME. Assuming them from the
+        // phase the receiver happens to be in would never exercise the domain
+        // separation that stops an independent opinion being replayed as a
+        // binding vote, nor let a dispute be told apart from support.
+        let envelope = received.envelope();
+        let (Some(stage), Some(verdict)) =
+            (stage_of(envelope.stage()), verdict_of(envelope.verdict()))
+        else {
+            return Err(TransitionError::DifferentSubject);
+        };
+        let opinion = Opinion::new(&member_id(claimed), subject.clone(), stage, verdict);
         observer.accept(opinion, clock)
     }
 
@@ -632,6 +688,40 @@ impl Deliberation {
                 rssi_dbm(&Link::new(distance), TX_POWER_DBM) + fading.sample_db()
             }
         }
+    }
+}
+
+/// Which verdict a member casts. Disputers come after the silent members.
+impl Deliberation {
+    const fn verdict_of(&self, sender: usize) -> Verdict {
+        if sender >= self.silent && sender < self.silent + self.disputers {
+            Verdict::Dispute
+        } else {
+            Verdict::Support
+        }
+    }
+
+    const fn is_forger(&self, sender: usize) -> bool {
+        let first = self.silent + self.disputers;
+        sender >= first && sender < first + self.forgers
+    }
+}
+
+const fn stage_of(code: u8) -> Option<Stage> {
+    match code {
+        1 => Some(Stage::Independent),
+        2 => Some(Stage::Consultation),
+        3 => Some(Stage::BindingSupport),
+        _ => None,
+    }
+}
+
+const fn verdict_of(code: u8) -> Option<Verdict> {
+    match code {
+        1 => Some(Verdict::Support),
+        2 => Some(Verdict::Dispute),
+        3 => Some(Verdict::InsufficientData),
+        _ => None,
     }
 }
 

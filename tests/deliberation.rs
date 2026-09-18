@@ -157,3 +157,74 @@ fn the_deliberation_is_deterministic_for_a_seed() {
     let run = || healthy().with_loss(0.4).with_seed(99).run();
     assert_eq!(run(), run());
 }
+
+#[test]
+fn a_dispute_is_recorded_but_never_counted() {
+    // There is no fleet verdict meaning "no danger". A dispute stops its author
+    // voting again and contributes nothing to the threshold, so three disputers
+    // out of ten leave seven supporters against a threshold of eight.
+    let report = healthy().with_disputers(3).run();
+    assert_eq!(report.binding_supporters, 7);
+    assert_eq!(report.min_signers, 8);
+    assert!(!report.endorsed);
+    assert_eq!(
+        report.refusals.total(),
+        0,
+        "a dispute is admitted, not refused"
+    );
+}
+
+#[test]
+fn one_dispute_still_leaves_endorsement_reachable() {
+    let report = healthy().with_disputers(1).run();
+    assert_eq!(report.binding_supporters, 9);
+    assert!(report.endorsed);
+}
+
+#[test]
+fn a_forged_signature_never_reaches_the_state_machine() {
+    // Holding the group key gets a frame decrypted. It does not make its author
+    // anybody else, and the quorum counts signatures.
+    let report = healthy().with_forgers(2).run();
+    assert_eq!(report.binding_supporters, 8);
+    assert!(report.stages[2].refused >= 2, "forgeries must be refused");
+    assert!(
+        report.endorsed,
+        "eight honest members still clear the threshold"
+    );
+}
+
+#[test]
+fn enough_forgeries_block_rather_than_fabricate() {
+    let report = healthy().with_forgers(4).run();
+    assert!(report.binding_supporters < report.min_signers);
+    assert!(!report.endorsed);
+}
+
+#[test]
+fn a_case_that_expires_before_the_vote_admits_nothing() {
+    // Expiry is checked before anything else: a case past its validity is not a
+    // case, whatever phase it is in. Validity here ends before the consultation
+    // cutoff can even be reached.
+    let report = healthy().with_validity_s(100).run();
+    assert_eq!(report.binding_supporters, 0);
+    assert!(!report.endorsed);
+    assert!(
+        report.refusals.expired > 0,
+        "the refusals must say it expired, got {:?}",
+        report.refusals
+    );
+}
+
+#[test]
+fn the_receiver_reads_the_stage_from_the_frame_not_from_its_own_phase() {
+    // If the receiver assumed the stage, the domain separation that stops an
+    // independent opinion being replayed as a binding vote would never be
+    // exercised, and a dispute could not be told from support. The healthy run
+    // admitting exactly ten per stage with no refusals is that check passing.
+    let report = healthy().run();
+    for stage in &report.stages {
+        assert_eq!(stage.admitted, 10);
+    }
+    assert_eq!(report.refusals.wrong_stage_for_phase, 0);
+}

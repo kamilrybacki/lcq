@@ -81,6 +81,23 @@ impl CompactEnvelope {
         self.sequence
     }
 
+    /// Which protocol stage this utterance claims to belong to.
+    ///
+    /// A receiver must read this from the frame rather than assume it from the
+    /// phase it happens to be in. The transcript is domain-separated by stage,
+    /// so a frame whose stage does not match what was signed fails to verify --
+    /// but only if somebody actually looks.
+    #[must_use]
+    pub const fn stage(&self) -> u8 {
+        self.stage
+    }
+
+    /// The verdict carried, as its wire code.
+    #[must_use]
+    pub const fn verdict(&self) -> u8 {
+        self.verdict
+    }
+
     /// The bytes a signature covers, domain-separated from the readable form so
     /// a signature over one can never verify as the other.
     #[must_use]
