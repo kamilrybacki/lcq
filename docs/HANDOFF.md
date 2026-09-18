@@ -56,7 +56,7 @@ is a product decision, not something to resolve quietly in code.
 
 ### Still absent
 
-A durable journal (the append-only gate is untouched; see `DECISIONS.md` D1), real radio hardware,
+Real radio hardware, multi-process operation with wall clocks, real radio hardware,
 model-quality coefficients, consultation supplements and evidence provenance.
 
 ### Earlier milestones
@@ -142,7 +142,7 @@ Passing tests are an arithmetic oracle, not a Byzantine safety proof.
 ### Next gate
 
 User review of the SF12 constraint and of the M5/M6 assumptions listed above,
-then either the append-only journal adapter (`DECISIONS.md` D1) or the model-integration stage.
+then multi-process operation with wall clocks, or the model-integration stage. The append-only journal adapter is done (`DECISIONS.md` D1).
 
 ## Original state at 2026-09-18
 

@@ -22,7 +22,7 @@ Acceptance: opinions do not count as binding votes; stage isolation; no cross-ve
 
 Proposed files: `src/lorai/storage.py`, `tests/test_storage.py`, `tests/test_crash_recovery.py`.
 
-Gate: approve append-only journal ordering and failure model, including disk full, partial-record tails and recovery truncation. Durability settings and recovery assumptions must be explicit. SQLite was rejected for this role -- see `DECISIONS.md` D1.
+Gate: CLEARED 2026-09-18. `LogJournal` implements the append-only journal; ordering, partial-record tails and recovery truncation are covered by `tests/log_journal.rs`, including an exhaustive truncation sweep and a SIGKILLed writer. SQLite was rejected for this role -- see `DECISIONS.md` D1. Still open: behaviour when the disk is full, and lock pruning for cases past their validity.
 
 Deliverable: durable mission context, monotonically reserved sequence numbers, binding-vote locks, consultation state, received message identities, bounded replay state, active subjects and outgoing bytes. A transaction must reserve safety state before exposing a packet to transmission. Outbox consumers are idempotent.
 

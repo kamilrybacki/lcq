@@ -59,8 +59,8 @@ fn a_different_revision_is_a_different_lock() {
 #[test]
 fn sequence_numbers_are_monotonic_and_never_reused() {
     let mut journal = MemoryJournal::default();
-    let first = journal.reserve_sequence();
-    let second = journal.reserve_sequence();
+    let first = journal.reserve_sequence().expect("memory never fails");
+    let second = journal.reserve_sequence().expect("memory never fails");
     assert!(second > first);
 
     // Surviving a restart must not rewind the counter: a reused sequence number

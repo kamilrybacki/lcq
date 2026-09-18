@@ -2,56 +2,19 @@
 //!
 //! Enough for the simulation stage, where a "restart" is
 //! [`MemoryJournal::restored`] from a snapshot rather than a process dying. The
-//! ordering guarantees are real; the durability is not, and a database-backed
-//! adapter has to supply that separately.
+//! ordering guarantees are real; the durability is not. A node that must
+//! survive its own process dying wants [`super::LogJournal`].
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
+
+use crate::infrastructure::lock_key::lock_key;
 
 use crate::application::{Journal, JournalError, JournalSnapshot, OutgoingFrame};
 use crate::domain::contracts::Subject;
 use crate::domain::time::Timestamp;
 
 extern crate alloc;
-
-/// Identity of one vote lock: the exact case, plus who voted on it.
-///
-/// Built from the full subject rather than the event ID alone, so a revision or
-/// a change of content is a different lock — as it must be, since those are
-/// different claims.
-fn lock_key(subject: &Subject, voter: &str) -> String {
-    // Hex by hand rather than `format!`: this runs on every lookup, and a
-    // formatter allocation per byte is not worth paying on a constrained node.
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    let mut key = String::new();
-    key.push_str(subject.mission());
-    key.push('\u{1f}');
-    key.push_str(subject.event());
-    key.push('\u{1f}');
-    for byte in subject.content_hash() {
-        key.push(HEX[(byte >> 4) as usize] as char);
-        key.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    key.push('\u{1f}');
-    let mut revision = subject.revision();
-    let mut digits = [0u8; 10];
-    let mut index = digits.len();
-    loop {
-        index -= 1;
-        digits[index] = b'0' + (revision % 10) as u8;
-        revision /= 10;
-        if revision == 0 {
-            break;
-        }
-    }
-    for digit in &digits[index..] {
-        key.push(*digit as char);
-    }
-    key.push('\u{1f}');
-    key.push_str(voter);
-    key
-}
 
 /// A journal held in memory.
 #[derive(Debug, Clone, Default)]
@@ -99,10 +62,11 @@ impl Journal for MemoryJournal {
         self.locks.contains(&lock_key(subject, voter))
     }
 
-    fn reserve_sequence(&mut self) -> u64 {
+    fn reserve_sequence(&mut self) -> Result<u64, JournalError> {
         let reserved = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
-        reserved
+        // Memory cannot fail to persist because it never persists at all.
+        Ok(reserved)
     }
 
     fn next_sequence(&self) -> u64 {

@@ -7,7 +7,8 @@ says what was decided, what it rules out, and what would justify revisiting it.
 
 ## D1 — The durable journal is an append-only log, not SQLite
 
-**Decided 2026-09-18.** Supersedes the SQLite gate in
+**Decided 2026-09-18. Implemented 2026-09-18** as `LogJournal` in
+`src/infrastructure/log.rs`, with recovery tests in `tests/log_journal.rs`. Supersedes the SQLite gate in
 `IMPLEMENTATION-ROADMAP.md` (M3) and the storage paragraph of the design spec.
 
 ### What has to survive a crash, and why
@@ -56,6 +57,28 @@ Not "a log file" in the loose sense. Specifically:
   after a power cut, not corruption.
 - The vote lock and the outbox entry for the same decision are written as one
   record, so they cannot be separated by a crash.
+
+### What was actually built
+
+`LogJournal` follows the format above. Two details are worth naming because they
+are the ones that are easy to get wrong:
+
+* The flush is `sync_all`, not `sync_data`. An append changes the file length,
+  and the length is metadata; flushing only the data can leave a durable record
+  inside a file that is still officially shorter than it.
+* Recovery does not try to resynchronise past damage. It stops at the first bad
+  record and truncates there, because a log is only meaningful as a prefix and
+  guessing where the next record begins would invent history.
+
+Compaction rewrites the live state to a sibling file, flushes it, renames it
+over the original and flushes the directory. A crash at any point leaves either
+the whole old log or the whole new one.
+
+The tests check the invariant at **every byte offset** a crash could land on,
+not at a few sampled ones, plus a real process killed with `SIGKILL` mid-write.
+What they cannot check is whether `sync_all` reached the platter: the scratch
+directory is usually a tmpfs, and no test can simulate a disk that lies about
+flushing. That part rests on the ordering being right.
 
 ### What would justify revisiting
 

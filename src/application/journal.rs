@@ -9,8 +9,9 @@
 //! threshold rests on.
 //!
 //! **A sequence number is never reused.** Under an existing key, a reused
-//! sequence is a reused nonce, which is a decryption oracle rather than an
-//! inconvenience. A restart must move the counter forward, never rewind it.
+//! sequence is a reused nonce. That repeats the keystream and exposes the
+//! Poly1305 key, which lets an attacker forge frames under the group key — not
+//! an inconvenience. A restart must move the counter forward, never rewind it.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -25,12 +26,20 @@ extern crate alloc;
 pub enum JournalError {
     /// This node already holds a vote lock for this case.
     AlreadyVoted,
+    /// The journal could not make the change durable.
+    ///
+    /// The operation did **not** happen: no lock was taken, no sequence was
+    /// handed out, nothing may go on the air. A node that cannot write its
+    /// decision down must not act on it, because a restart would then find no
+    /// record and let it decide a second time.
+    NotDurable,
 }
 
 impl fmt::Display for JournalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyVoted => f.write_str("a binding vote is already recorded for this case"),
+            Self::NotDurable => f.write_str("the journal could not be made durable"),
         }
     }
 }
@@ -119,7 +128,16 @@ pub trait Journal {
     fn has_voted(&self, subject: &Subject, voter: &str) -> bool;
 
     /// Reserve a sequence number that will never be handed out again.
-    fn reserve_sequence(&mut self) -> u64;
+    ///
+    /// The reservation is durable before it is returned. Anything else would
+    /// hand out a nonce the journal has not recorded, and a crash in that
+    /// window would hand the same nonce out twice.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::NotDurable`] if the reservation could not be persisted.
+    /// No number is consumed, and the caller must not transmit.
+    fn reserve_sequence(&mut self) -> Result<u64, JournalError>;
 
     /// The next sequence number that has never been used.
     fn next_sequence(&self) -> u64;
