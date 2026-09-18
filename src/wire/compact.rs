@@ -5,12 +5,16 @@
 //! mission manifest already knows. This form carries indices into that manifest
 //! instead.
 //!
-//! Measured, not assumed: the readable form seals to 156 bytes and only fits
-//! SF7. This form fits SF10. **Neither fits SF12**, whose 51-byte payload cannot
-//! hold a 64-byte ed25519 signature at all — and the design forbids truncating
-//! signatures to buy airtime. Long range therefore needs a different signature
-//! scheme or an explicit bounded fragmentation design, and that is a decision
-//! for a later milestone rather than something to paper over here.
+//! Measured, not assumed: the readable form seals to 156 bytes, this one to
+//! 105. Both fit a raw `LoRa` payload at every spreading factor — the 51-byte
+//! figure that once appeared here is `LoRaWAN`'s DR0 application cap, not a PHY
+//! limit, and this protocol is peer to peer. What a long-range frame cannot
+//! afford is the airtime, which `DECISIONS.md` D2 measures and settles.
+//!
+//! Of these 105 bytes, 64 are the signature and 32 the content hash, so 91 % of
+//! every frame is those two fields. The hash is the addressable part: a short
+//! case reference would do, because a receiver already knows the case and can
+//! verify against the full hash it holds — see `DECISIONS.md` D4.
 
 use alloc::vec::Vec;
 

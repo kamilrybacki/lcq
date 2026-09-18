@@ -13,6 +13,14 @@
 //! simply not there. Every node has an hourly airtime budget and is refused
 //! once it is spent.
 //!
+//! # One assumption to keep in view
+//!
+//! By default a sender stops retrying once its frame is decoded, which means
+//! the model assumes it somehow **learns** that it was heard. Nothing in the
+//! wire format carries that. Every figure here is measured under that
+//! assumption; [`Scenario::without_acknowledgement`] measures what dropping it
+//! costs, and the answer is roughly four and a half times the airtime.
+//!
 //! # What is not
 //!
 //! The propagation model is a textbook one evaluated over assumed geometry: one
@@ -39,4 +47,4 @@ pub use phy::{
     rssi_dbm, sensitivity_dbm_at,
 };
 pub use rng::Rng;
-pub use scenario::{Access, Outcome, Report, Scenario, TraceEntry};
+pub use scenario::{Access, Acknowledgement, Outcome, Report, Scenario, TraceEntry};

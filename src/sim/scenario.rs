@@ -49,6 +49,22 @@ pub enum Access {
     },
 }
 
+/// Whether a sender ever learns that it was heard.
+///
+/// This is not a tuning knob. Without some acknowledgement on the air, a member
+/// cannot tell a delivered frame from a lost one, so it must keep transmitting
+/// until its attempts run out — and the hourly airtime budget cannot pay for
+/// that. The protocol has `Journal::acknowledge` at the storage layer but no
+/// frame that carries the fact, so [`Acknowledgement::Assumed`] is currently a
+/// promise the wire format does not keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acknowledgement {
+    /// The sender somehow learns of delivery and stops. Optimistic.
+    Assumed,
+    /// The sender never learns, so it uses every attempt it has.
+    None,
+}
+
 /// What became of one transmission, from the observer's seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -134,6 +150,7 @@ pub struct Scenario {
     spacing_m: Option<f64>,
     prior_airtime_ms: u64,
     access: Access,
+    acknowledgement: Acknowledgement,
 }
 
 impl Scenario {
@@ -177,6 +194,7 @@ impl Scenario {
             spacing_m: None,
             prior_airtime_ms: 0,
             access: Access::Random,
+            acknowledgement: Acknowledgement::Assumed,
         }
     }
 
@@ -251,6 +269,22 @@ impl Scenario {
     pub const fn with_slots(mut self, guard_ms: u64) -> Self {
         self.access = Access::Slotted { guard_ms };
         self
+    }
+
+    /// Model a fleet with no acknowledgement on the air.
+    ///
+    /// Every member spends all of its attempts, because none of them can tell
+    /// whether the first one landed.
+    #[must_use]
+    pub const fn without_acknowledgement(mut self) -> Self {
+        self.acknowledgement = Acknowledgement::None;
+        self
+    }
+
+    /// Whether senders learn that they were heard.
+    #[must_use]
+    pub const fn acknowledgement(&self) -> Acknowledgement {
+        self.acknowledgement
     }
 
     /// How members decide when to transmit.
@@ -545,7 +579,16 @@ impl<'a> Run<'a> {
                     retry.push(*sender);
                     Outcome::LostToResidualNoise
                 }
-                Reception::Decoded => self.accept(*sender),
+                Reception::Decoded => {
+                    let verdict = self.accept(*sender);
+                    if self.scenario.acknowledgement == Acknowledgement::None {
+                        // Delivered, but the sender has no way to know that, so
+                        // it transmits again. Every one of these frames is pure
+                        // waste charged against the hourly budget.
+                        retry.push(*sender);
+                    }
+                    verdict
+                }
             };
             self.tally.record(
                 round,

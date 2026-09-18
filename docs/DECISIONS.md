@@ -234,3 +234,65 @@ blocked situation into a working one.
 Piggybacked acknowledgement. Members currently retry up to five times with no
 way to learn they were already heard, which is pure waste on a budget this
 tight. The observer's own frames could carry a bitmap of verified indices.
+
+---
+
+## D4 — Where the remaining airtime goes, and what is worth spending effort on
+
+**Recorded 2026-09-18.** Not a decision so much as the measurement that any
+later optimisation has to argue against. Produced by `examples/budget`.
+
+### The frame is two fields
+
+| field | bytes | share |
+|---|---:|---:|
+| ed25519 signature | 64 | 61 % |
+| content hash of the case | 32 | 30 % |
+| everything else | 9 | 9 % |
+
+Under slotted access (D3) the channel is busy for most of a round, so latency is
+now dominated by airtime itself. Airtime is very nearly linear in payload, which
+kills one idea before it costs anything: **packing several votes into one frame
+does not help.** Three votes in one 210-byte frame cost 642 ms per vote against
+821 ms alone — a 22 % saving that comes only from amortising the preamble, and
+five votes do not fit a `LoRa` payload at all.
+
+### Ranked by what they are worth
+
+1. **A short case reference instead of the full hash.** 105 B → 77 B, 1067 ms →
+   821 ms, a **23 % cut to every frame the protocol will ever send**. No security
+   is traded: the signature keeps covering the full 32-byte hash, which the
+   receiver reconstructs from the case it already holds. The short tag is a
+   lookup key, and picking the wrong case simply fails verification. Cheap,
+   contained, and it compounds with everything below.
+2. **Stop once the threshold is met.** Members past the quorum need not vote.
+   Ten members with a threshold of eight is a 20 % saving, and the ratio holds
+   as fleets grow.
+3. **An acknowledgement on the air.** Measured below; worth about 4.5× the
+   airtime. Larger than either of the above, and not yet designed.
+4. **BLS aggregation.** Ten signatures become one 48-byte aggregate, so a whole
+   endorsement fits a single frame: 10.7 s of channel time becomes 0.9 s. An
+   order of magnitude, and the only way past the signature. It costs pairing
+   arithmetic, a substantial dependency, slower verification on a constrained
+   node, and a different curve assumption. A milestone, not an afternoon.
+
+### The acknowledgement, measured rather than assumed
+
+The simulator lets a sender stop retrying once its frame is decoded. That
+assumes the sender **learns** it was heard, and nothing in the wire format says
+so. `Journal::acknowledge` exists at the storage layer; no frame carries the
+fact.
+
+Dropping the assumption costs 46 frames instead of 10, and 4.9 s of airtime per
+node instead of 1.1 s — **33 decisions an hour per node against 7**.
+
+The first guess was that this would break quorum under a tight budget. It does
+not, and the measurement said so: under slots the first attempt always lands, so
+every blind retry is waste arriving *after* the vote already counted, and the
+1 % limit clips the waste rather than the vote. An acknowledgement is worth a
+great deal of airtime and no correctness at all.
+
+### Not worth doing
+
+Truncating the signature. Concatenating votes without aggregating them. Raising
+the spreading factor for range (D2). Assuming a shared wall clock (D3).
