@@ -5,5 +5,7 @@
 //! and persisted to a database without either knowing about the other.
 
 mod journal;
+mod queue;
 
 pub use journal::{Journal, JournalError, JournalSnapshot, OutgoingFrame};
+pub use queue::{Priority, QueueError, RadioQueue};

@@ -1,6 +1,65 @@
 # Handoff — Claude Code / next implementer
 
-## State at 2026-09-18 (M1 + M2 implemented, awaiting user review)
+## State at 2026-09-18 (M1-M6 implemented, awaiting user review)
+
+### The protocol runs end to end
+
+`cargo run --example fleet` puts a fleet through endorsement over a lossy
+channel. Verified signatures, group encryption, bounded queues, store-and-forward
+retries and virtual time, all together:
+
+| scenario | supporters | threshold | frames | rejected | endorsed |
+|---|---|---|---|---|---|
+| 5 nodes, no loss | 5 | 4 | 5 | 0 | yes |
+| 10 nodes, 30 % loss | 10 | 8 | 14 | 0 | yes |
+| 10 nodes, 60 % loss | 9 | 8 | 24 | 0 | yes |
+| 10 nodes, partitioned | 5 | 8 | 30 | 0 | **no** |
+| 10 nodes, 4 silent (the budget) | 6 | 8 | 6 | 0 | **no** |
+| 5 nodes, 2 forgers | 3 | 4 | 5 | **2** | **no** |
+| 20 nodes, 30 % loss | 20 | 15 | 29 | 0 | yes |
+
+The three "no" rows are the protocol behaving correctly. Blocking is an
+acceptable outcome; fabricating a quorum is not.
+
+### Two findings the simulation produced, not assumptions
+
+**Silence at the fault budget blocks liveness.** With N=10 the count threshold
+is 8, so four silent members put endorsement permanently out of reach. The spec
+warns of exactly this; a first version of the test asserted the opposite and was
+wrong.
+
+**A partition must be judged from one seat.** An early model counted a frame as
+verified if *anyone* heard it, which made a partitioned fleet look unanimous to
+nobody in particular — a fabricated quorum. Endorsement is now evaluated from a
+single observing node.
+
+### M5 and M6
+
+M5 gate choices, all assumptions rather than approvals: queue caps are explicit
+item and byte budgets, distress pre-empts routine but only in bursts of 8 so the
+low class cannot starve, dedup memory is bounded at 1024 entries, and a peer's
+claim of urgency never raises a local cap. M6 models loss as an independent
+per-link probability with a seeded generator, and computes airtime from the
+Semtech formula for SF10/125 kHz/CR 4/5.
+
+**What M6 is not:** no collisions, no capture effect, no path loss, no fading,
+no duty-cycle enforcement. Nothing here supports any claim about real maritime
+range.
+
+### The wire constraint that needs a decision
+
+A core frame seals to 128 B in compact form and fits SF10, but **no form fits
+SF12**. Its 51-byte payload cannot hold a 64-byte ed25519 signature, and the
+design forbids truncating signatures for airtime. Maximum range therefore needs
+a different signature scheme or an explicit bounded fragmentation design. That
+is a product decision, not something to resolve quietly in code.
+
+### Still absent
+
+A database-backed journal (the SQLite gate is untouched), real radio hardware,
+model-quality coefficients, consultation supplements and evidence provenance.
+
+### Earlier milestones
 
 ### M2 — logical contracts and positive-only state machine
 
@@ -56,7 +115,7 @@ All product decisions in this document are unchanged.
 
 | command | result |
 |---|---|
-| `cargo test` | 49 passed (10 policy, 8 evaluation, 3 property, 10 contracts, 13 state, 5 time) |
+| `cargo test` | 88 passed across 9 suites |
 | `cargo clippy --all-targets -- -D warnings` | clean at `pedantic` |
 | `cargo fmt --check` | clean |
 | `cargo build --release` | builds |
@@ -82,8 +141,8 @@ Passing tests are an arithmetic oracle, not a Byzantine safety proof.
 
 ### Next gate
 
-M3 (durable identity, active state, outbox), after user review. Its gate
-requires approving SQLite transaction ordering and the failure model.
+User review of the SF12 constraint and of the M5/M6 assumptions listed above,
+then either a SQLite journal adapter or the model-integration stage.
 
 ## Original state at 2026-09-18
 

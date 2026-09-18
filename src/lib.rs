@@ -11,6 +11,7 @@
 pub mod application;
 pub mod domain;
 pub mod infrastructure;
+pub mod sim;
 pub mod wire;
 
 pub use domain::quorum::{EvaluationError, Policy, PolicyError, QuorumResult, evaluate};
