@@ -39,4 +39,4 @@ pub use phy::{
     rssi_dbm, sensitivity_dbm_at,
 };
 pub use rng::Rng;
-pub use scenario::{Outcome, Report, Scenario, TraceEntry};
+pub use scenario::{Access, Outcome, Report, Scenario, TraceEntry};

@@ -161,3 +161,76 @@ SF12 must be refused if someone configures it.
 only where the symbol time passes about 16 ms, which at 125 kHz means SF11 and
 SF12. Every SF10 airtime figure was therefore overstated by about 23 %, and
 airtime is what the duty cycle is spent on.
+
+---
+
+## D3 — Members transmit in the slot their manifest index gives them
+
+**Decided 2026-09-18.** Random contention is kept as a fallback and as the
+baseline every measurement here is against.
+
+### The problem, measured
+
+A ten-member endorsement took 161 seconds. Of that, **17 seconds was
+transmission and 144 seconds was silence** — the channel sat idle 89 % of the
+time. The delay was not the radio. It was the access scheme: members drew a
+random offset inside a 30 s contention window, collided, and retried inside a
+window twice as wide.
+
+That is self-inflicted. This is a *known-membership* protocol. Every frame
+already carries `author_index`, its position in the manifest. Competing at
+random for the channel throws away information the protocol is built on.
+
+### Slots, counted from the trigger
+
+Member *i* transmits at `i × (airtime + guard)` after the frame that triggered
+the round.
+
+The reference point matters. Agreeing on a shared wall-clock instant to within
+a second is impossible here — `MAX_CLOCK_SKEW_SECONDS` is 30. But agreeing on
+*when that frame ended* needs only millisecond accuracy, which the demodulator
+already has, and a member that did not hear the trigger cannot take part
+anyway. A 200 ms guard covers demodulation jitter and drift across one round.
+
+### Measured against the same fleets
+
+| scenario | random | slotted | frames | collisions |
+|---|---:|---:|---|---|
+| 10 members | 161.2 s | **12.5 s** | 16 → 10 | 6 → 0 |
+| 20 members | 181.7 s | **25.1 s** | 42 → 20 | 22 → 0 |
+| 10 members, 60 % loss | 607.3 s | **47.9 s** | 27 → 25 | 5 → 0 |
+| convoy, 4 km spacing | 660.8 s | **63.1 s** | 19 → 18 | 1 → 0 |
+
+Collisions are zero in every case, not merely fewer: two members cannot pick the
+same slot because neither picks at all.
+
+**The result that is not about latency:** the scenario where 34 of 36 seconds of
+hourly airtime were already spent on other traffic *failed* to reach quorum
+under random access and *reaches it* under slots. Without collisions there are
+no retries, so the remaining budget is enough. Scheduling turned an unlawful-or-
+blocked situation into a working one.
+
+### What this does not buy, and what it costs
+
+* **It does not repair a partition or reach a distant member.** Scheduling
+  decides who talks over whom; it cannot make an unreachable member audible. A
+  scheme that appeared to would be inventing quorum. Both are asserted in
+  `tests/access.rs`.
+* **It makes jamming easier to aim.** A faulty member — and the fault budget
+  allows 40 % of them — can transmit in someone else's slot and silence that
+  specific member every round. Under random access the damage is spread. This
+  is a **liveness** regression, not a safety one: no schedule lets anyone forge
+  a signature, so a jammed fleet blocks rather than approves. A determined
+  jammer defeats both schemes by transmitting continuously.
+* **Silent members still hold their slots.** A round is `N × (airtime + guard)`
+  whether members answer or not. Compacting would require knowing in advance who
+  is going to stay quiet.
+* **It scales linearly, which random access does not.** A round grows with *N*;
+  random collisions grow with *N²*, which is why the advantage widens from 12×
+  at ten members to more at twenty.
+
+### Still open
+
+Piggybacked acknowledgement. Members currently retry up to five times with no
+way to learn they were already heard, which is pure waste on a budget this
+tight. The observer's own frames could carry a bitmap of verified indices.

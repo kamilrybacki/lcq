@@ -91,3 +91,6 @@ This milestone spans other repositories and requires separate plans/authorizatio
 | MQTT/HTTP, actual inference and physical radios | M8 in coordinated projects |
 
 Complete M1 does not mean complete protocol. Complete M6 does not mean validated hardware. Complete simulated attack tests do not constitute a security audit or proof.
+
+
+Radio scheduling: slotted access by manifest index is the default design -- see `DECISIONS.md` D3. Random contention is retained as the measurement baseline and as a fallback where the trigger is not commonly heard.

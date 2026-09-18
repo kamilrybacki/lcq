@@ -15,8 +15,14 @@ use lorai::sim::{
 /// A signed, compacted endorsement frame.
 const FRAME_BYTES: usize = 105;
 
+/// Time on air for one such frame at the default spreading factor.
+const FRAME_AIRTIME_MS: u64 = 1067;
+
 /// Loss per doubling of distance in the two-ray far field over water.
 const DB_PER_DOUBLING: f64 = 12.04;
+
+/// Dead time between slots: demodulation jitter plus drift across one round.
+const GUARD_MS: u64 = 200;
 
 fn main() {
     println!("{{");
@@ -115,8 +121,20 @@ fn print_spreading() {
 }
 
 fn print_scenarios(cases: &[(&str, Scenario)]) {
+    // Each fleet is run twice, under both access schemes, so a reader can put
+    // the two side by side rather than take the comparison on trust.
+    let runs: Vec<(&str, &str, Scenario)> = cases
+        .iter()
+        .flat_map(|(name, scenario)| {
+            [
+                (*name, "random", scenario.clone()),
+                (*name, "slotted", scenario.clone().with_slots(GUARD_MS)),
+            ]
+        })
+        .collect();
+
     println!("  \"scenarios\": [");
-    for (index, (name, scenario)) in cases.iter().enumerate() {
+    for (index, (name, access, scenario)) in runs.iter().enumerate() {
         let report = scenario.run();
         let duration = report
             .timeline
@@ -124,10 +142,12 @@ fn print_scenarios(cases: &[(&str, Scenario)]) {
             .map(|f| f.start_ms + f.airtime_ms)
             .max()
             .unwrap_or(0);
-        let comma = if index + 1 == cases.len() { "" } else { "," };
+        let comma = if index + 1 == runs.len() { "" } else { "," };
 
         println!("    {{");
         println!("      \"name\": \"{name}\",");
+        println!("      \"access\": \"{access}\",");
+        println!("      \"slotMs\": {},", FRAME_AIRTIME_MS + GUARD_MS);
         println!("      \"fleet\": {},", scenario.fleet());
         match scenario.spacing_m() {
             // Null is not "zero metres apart": it means distance is not

@@ -24,6 +24,31 @@ const OBSERVER: usize = 0;
 /// on does not shift which frames the residual-loss draw discards.
 const FADING_STREAM: u64 = 0x9E37_79B9_7F4A_7C15;
 
+/// How members decide when to transmit.
+///
+/// The protocol knows exactly who its members are -- every frame already
+/// carries the author's index into the manifest -- so competing at random for
+/// the channel throws that information away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Each member picks a uniform offset inside a contention window, and the
+    /// window doubles on every retry. Assumes nothing, collides accordingly.
+    Random,
+    /// Each member transmits in the slot its manifest index gives it.
+    ///
+    /// Slots are counted from the frame that triggered the round, which every
+    /// participating member heard, rather than from a wall clock. That matters:
+    /// agreeing on a shared instant to within a second would be impossible
+    /// under [`crate::domain::time::MAX_CLOCK_SKEW_SECONDS`], but agreeing on
+    /// "when that frame ended" needs only millisecond-scale accuracy, which the
+    /// demodulator already has. A member that did not hear the trigger cannot
+    /// take part anyway.
+    Slotted {
+        /// Dead time between slots, absorbing demodulation jitter and drift.
+        guard_ms: u64,
+    },
+}
+
 /// What became of one transmission, from the observer's seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -108,6 +133,7 @@ pub struct Scenario {
     forgers: usize,
     spacing_m: Option<f64>,
     prior_airtime_ms: u64,
+    access: Access,
 }
 
 impl Scenario {
@@ -150,6 +176,7 @@ impl Scenario {
             forgers: 0,
             spacing_m: None,
             prior_airtime_ms: 0,
+            access: Access::Random,
         }
     }
 
@@ -213,6 +240,23 @@ impl Scenario {
     pub fn with_prior_airtime_ms(mut self, prior_airtime_ms: u64) -> Self {
         self.prior_airtime_ms = prior_airtime_ms;
         self
+    }
+
+    /// Give every member the slot its manifest index earns it.
+    ///
+    /// `guard_ms` is the dead time between slots. It has to cover the spread in
+    /// when members decided the trigger ended, plus oscillator drift across the
+    /// round -- tens of milliseconds of real need, not seconds.
+    #[must_use]
+    pub const fn with_slots(mut self, guard_ms: u64) -> Self {
+        self.access = Access::Slotted { guard_ms };
+        self
+    }
+
+    /// How members decide when to transmit.
+    #[must_use]
+    pub const fn access(&self) -> Access {
+        self.access
     }
 
     /// How many members there are.
@@ -348,12 +392,9 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// One contention round. Returns the members that must try again.
+    /// One round. Returns the members that must try again.
     fn round(&mut self, round: usize, pending: Vec<usize>) -> Vec<usize> {
-        // Backoff: each retry spreads the survivors over twice the window,
-        // capped so a long tail does not push responses past any sane deadline.
-        // Without it a collided round simply collides again.
-        let window = Scenario::CONTENTION_WINDOW_MS << u32::try_from(round.min(3)).unwrap_or(3);
+        let window = self.window_for(round);
         let mut retry = Vec::new();
 
         if round == 0 {
@@ -371,6 +412,34 @@ impl<'a> Run<'a> {
         retry
     }
 
+    /// How long this round lasts.
+    ///
+    /// Random access spreads members over a window that doubles on every retry;
+    /// without that backoff a collided round simply reproduces its own pile-up.
+    /// A slotted round needs exactly one slot per member and never retries for
+    /// contention, because contention cannot happen.
+    fn window_for(&self, round: usize) -> u64 {
+        match self.scenario.access {
+            Access::Random => Scenario::window_ms(round),
+            Access::Slotted { guard_ms } => {
+                let air = airtime_ms(self.frames[OBSERVER].len());
+                (air + guard_ms) * self.scenario.fleet as u64
+            }
+        }
+    }
+
+    /// When `sender` keys up inside this round.
+    fn start_for(&mut self, sender: usize, air: u64, window: u64) -> u64 {
+        match self.scenario.access {
+            Access::Random => self.elapsed_ms + self.rng.below(window),
+            // The member's manifest index is its slot. Nothing is drawn, so
+            // nothing can collide, and the generator is not consumed either --
+            // a slotted run and a random one at the same seed stay comparable
+            // on everything except the thing being compared.
+            Access::Slotted { guard_ms } => self.elapsed_ms + sender as u64 * (air + guard_ms),
+        }
+    }
+
     /// The observer answers once, in the first round.
     ///
     /// It needs no radio to know its own vote, but its transmission still
@@ -382,7 +451,7 @@ impl<'a> Run<'a> {
         let air = airtime_ms(self.frames[OBSERVER].len());
         let charged = self.tally.charge(&mut self.used_airtime, OBSERVER, air, 0);
         let start = if charged {
-            self.elapsed_ms + self.rng.below(window)
+            self.start_for(OBSERVER, air, window)
         } else {
             0
         };
@@ -425,7 +494,7 @@ impl<'a> Run<'a> {
                 // back inside the scenario's horizon.
                 continue;
             }
-            let start = self.elapsed_ms + self.rng.below(window);
+            let start = self.start_for(sender, air, window);
             if self
                 .scenario
                 .topology
