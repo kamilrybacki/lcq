@@ -5,9 +5,13 @@
 //! binary is not worth a dependency.
 
 use lorai::sim::{
-    ANTENNA_GAIN_DBI, Outcome, SENSITIVITY_DBM, Scenario, TX_POWER_DBM, Topology, TraceEntry,
-    breakpoint_m, path_loss_db, radio_horizon_m,
+    ANTENNA_GAIN_DBI, DUTY_CYCLE_BUDGET_MS, Outcome, SENSITIVITY_DBM, Scenario, TX_POWER_DBM,
+    Topology, TraceEntry, airtime_ms_at, breakpoint_m, path_loss_db, radio_horizon_m,
+    sensitivity_dbm_at,
 };
+
+/// A signed, compacted endorsement frame.
+const FRAME_BYTES: usize = 105;
 
 fn main() {
     let cases: Vec<(&str, Scenario)> = vec![
@@ -70,6 +74,24 @@ fn main() {
         distance *= 1.15;
     }
     println!("],");
+
+    // Every spreading factor, so the page cannot drift from the crate.
+    print!("  \"spreading\": [");
+    let reference = sensitivity_dbm_at(10);
+    for sf in 7..=12u8 {
+        let air = airtime_ms_at(sf, FRAME_BYTES);
+        let reach = 2f64.powf((reference - sensitivity_dbm_at(sf)) / 12.04);
+        if sf > 7 {
+            print!(", ");
+        }
+        print!(
+            "{{\"sf\": {sf}, \"airtimeMs\": {air}, \"sensitivityDbm\": {}, \"framesPerHour\": {}, \"reach\": {reach:.2}}}",
+            sensitivity_dbm_at(sf),
+            DUTY_CYCLE_BUDGET_MS / air.max(1)
+        );
+    }
+    println!("],");
+    println!("  \"frameBytes\": {FRAME_BYTES},");
 
     println!("  \"scenarios\": [");
     for (index, (name, scenario)) in cases.iter().enumerate() {
