@@ -41,6 +41,28 @@ extern crate alloc;
 /// Judged from one observer's seat, as everywhere else in this crate.
 const OBSERVER: usize = 0;
 
+/// Where a slot schedule counts from.
+///
+/// This is the choice the protocol has not settled, and the two options fail in
+/// opposite directions. Measured by `examples/anchor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotAnchor {
+    /// Slots count from the frame that opened the round.
+    ///
+    /// Accurate to the demodulator, so clock skew does not disturb it at all.
+    /// But a compromised member can send different, validly signed opening
+    /// frames to different receivers and split the fleet onto colliding
+    /// schedules: signatures do not prevent equivocation by a member.
+    Trigger,
+    /// Slots count from a deadline on each node's own clock.
+    ///
+    /// Canonical — every honest node derives the same schedule from signed
+    /// content, so there is nothing to equivocate about. But each node starts
+    /// where *its* clock says, and the budget allows honest clocks to differ by
+    /// [`MAX_CLOCK_SKEW_SECONDS`], which is far wider than a slot.
+    Clock,
+}
+
 /// Received power assumed when no geometry is configured.
 const NOMINAL_RSSI_DBM: f64 = -80.0;
 
@@ -115,6 +137,8 @@ pub struct Deliberation {
     silent: usize,
     spacing_m: Option<f64>,
     access: Access,
+    anchor: SlotAnchor,
+    clock_skew_s: u64,
 }
 
 impl Deliberation {
@@ -135,6 +159,8 @@ impl Deliberation {
             silent: 0,
             spacing_m: None,
             access: Access::Random,
+            anchor: SlotAnchor::Trigger,
+            clock_skew_s: 0,
         }
     }
 
@@ -180,6 +206,25 @@ impl Deliberation {
         self
     }
 
+    /// Where the slot schedule counts from.
+    #[must_use]
+    pub const fn with_anchor(mut self, anchor: SlotAnchor) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// Spread the members' clocks over this many seconds, pairwise.
+    ///
+    /// Zero is the fiction every earlier figure in this crate rested on: one
+    /// clock for the whole fleet. The protocol's own budget allows honest nodes
+    /// to differ by [`MAX_CLOCK_SKEW_SECONDS`], and a schedule anchored to a
+    /// wall clock has to survive that.
+    #[must_use]
+    pub const fn with_clock_skew_s(mut self, clock_skew_s: u64) -> Self {
+        self.clock_skew_s = clock_skew_s;
+        self
+    }
+
     /// Run the whole deliberation: consult, freeze, vote.
     ///
     /// # Panics
@@ -207,6 +252,7 @@ impl Deliberation {
         let mut fading = RicianFading::new(self.seed ^ 0x9E37_79B9_7F4A_7C15, RICIAN_K_DB);
         let mut used_airtime: Vec<u64> = alloc::vec![0; self.fleet];
         let mut refusals = TransitionErrorCount::default();
+        let offsets = self.clock_offsets_ms();
 
         // The consultation stages run while the cutoff is still ahead.
         let mut clock = FixedClock::new(started_at.plus_secs(1));
@@ -230,6 +276,7 @@ impl Deliberation {
                 &mut fading,
                 &mut used_airtime,
                 &mut refusals,
+                &offsets,
             );
             radio_ms += stages[index].elapsed_ms;
         }
@@ -256,6 +303,7 @@ impl Deliberation {
             &mut fading,
             &mut used_airtime,
             &mut refusals,
+            &offsets,
         );
         radio_ms += stages[2].elapsed_ms;
 
@@ -278,6 +326,37 @@ impl Deliberation {
             frame_bytes,
             refusals,
         }
+    }
+
+    /// Each member's clock error, in milliseconds, spread over the budget.
+    ///
+    /// Deterministic from the seed and symmetric about zero, so the widest pair
+    /// differs by exactly the configured budget -- which is what the budget
+    /// means: a bound on how far two honest clocks can be from EACH OTHER.
+    fn clock_offsets_ms(&self) -> Vec<i64> {
+        if self.clock_skew_s == 0 || self.fleet < 2 {
+            return alloc::vec![0; self.fleet];
+        }
+        let span = i64::try_from(self.clock_skew_s * 1_000).unwrap_or(i64::MAX);
+        // Drawn, not spread evenly by index. A monotone spread runs in the same
+        // order as the slots, which pushes members further apart instead of
+        // into each other -- it measures a lucky arrangement rather than skew.
+        // Real clock error has nothing to do with a member's manifest position.
+        let mut rng = Rng::new(self.seed ^ 0xC10C_C10C_C10C_C10C);
+        let mut offsets: Vec<i64> = (0..self.fleet)
+            .map(|_| {
+                // Drawn as an integer so no float conversion is involved:
+                // the span is milliseconds and fits an i64 exactly.
+                let draw =
+                    i64::try_from(rng.below(u64::try_from(span).unwrap_or(0) + 1)).unwrap_or(0);
+                draw - span / 2
+            })
+            .collect();
+        // Pin the extremes so the widest pair really does differ by the whole
+        // budget: a scenario that quietly used half of it would flatter itself.
+        offsets[0] = -span / 2;
+        offsets[self.fleet - 1] = span / 2;
+        offsets
     }
 
     /// How long one round of a stage lasts.
@@ -321,6 +400,7 @@ impl Deliberation {
         fading: &mut RicianFading,
         used_airtime: &mut [u64],
         refusals: &mut TransitionErrorCount,
+        offsets: &[i64],
     ) -> StageReport {
         let mut report = StageReport::default();
         let mut pending: Vec<usize> = (self.silent..self.fleet).collect();
@@ -369,7 +449,18 @@ impl Deliberation {
 
                 let start = match self.access {
                     Access::Random => elapsed + rng.below(window),
-                    Access::Slotted { guard_ms } => elapsed + sender as u64 * (air + guard_ms),
+                    Access::Slotted { guard_ms } => {
+                        let slot = elapsed + sender as u64 * (air + guard_ms);
+                        match self.anchor {
+                            // Counted from a frame everyone heard, so every
+                            // member agrees on the origin to within the
+                            // demodulator's accuracy.
+                            SlotAnchor::Trigger => slot,
+                            // Counted from each node's own clock, so the whole
+                            // schedule slides by that node's error.
+                            SlotAnchor::Clock => slot.saturating_add_signed(offsets[sender]),
+                        }
+                    }
                 };
                 if sender == OBSERVER {
                     // Its own utterance needs no radio, but the transmission

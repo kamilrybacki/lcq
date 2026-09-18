@@ -383,3 +383,64 @@ liveness hole, not a security mechanism. Also outstanding from the same review:
 per-sender replay windows with retention limits, cheap rejection of senders
 outside the manifest, and reporting targeted slot denial and fairness rather
 than only collision counts.
+
+---
+
+## D6 — The slot schedule must anchor on the trigger, so equivocation has to be solved directly
+
+**Decided 2026-09-18**, by measurement. Closes half of the blocker left open in
+D5 and sharpens the other half.
+
+### The two anchors, measured
+
+D5 left the anchor undecided between a heard frame (accurate but equivocable)
+and signed content on each node's wall clock (canonical but skewed). Every
+figure before this rested on a fiction: all members shared one clock. Giving
+each member its own error, drawn rather than spread — a monotone spread by index
+runs in the same order as the slots and pushes members apart instead of into
+each other — settles it.
+
+Ten members, twenty seeds each, slotted access:
+
+| anchor | skew | frames | collisions | airtime | quorum |
+|---|---:|---:|---:|---:|---|
+| trigger | 0 s | 30 | 0 | 38.2 s | always |
+| trigger | 2 s | 30 | 0 | 38.2 s | always |
+| trigger | 10 s | 30 | 0 | 38.2 s | always |
+| trigger | 30 s | 30 | **0** | 38.2 s | always |
+| clock | 0 s | 30 | 0 | 38.2 s | always |
+| clock | 2 s | 91 | **76** | 115.8 s | **lost in some runs** |
+| clock | 10 s | 94 | 79 | 119.1 s | lost in some runs |
+| clock | 30 s | 76 | 56 | 96.7 s | lost in some runs |
+
+A clock-anchored schedule does not degrade gracefully: it collapses as soon as
+clocks are allowed to disagree **at all**. The reason is a ratio, not a detail.
+A slot is about 1.5 s wide and the skew budget is 30 s, so members land in each
+other's slots immediately. Surviving it would need slots wider than the budget —
+a 30 s slot for a 1.3 s frame — which discards the whole point of scheduling.
+
+### Therefore
+
+**Slots anchor on the trigger.** There is no second option, so the equivocation
+problem cannot be dodged by changing anchors and has to be solved head on.
+
+### Recommended treatment of equivocation, not yet implemented
+
+A compromised member can send different, validly signed opening frames to
+different receivers. Signatures do not prevent a member from saying two things.
+The available mitigations are about **detecting and containing** it:
+
+1. **Make the round identity the trigger's hash.** Two different triggers are
+   then two different rounds, and their votes never merge into one tally. The
+   fleet's schedule can still be split, but a quorum cannot be fabricated from
+   the halves, which is the property that actually matters.
+2. **Treat hearing two triggers for one subject as evidence.** A member that
+   sees both holds signed proof that one member said two things, which is
+   exactly the material an exclusion procedure needs.
+3. **Fall back to random contention on detection.** Contention is immune to
+   equivocation because it has no schedule to split. Slower, and correct.
+
+That combination keeps safety unconditional and degrades liveness gracefully,
+which is the same shape as every other trade in this protocol. Until it is
+built, slotted access remains an airtime optimisation with a known liveness
+hole, and random contention stays the default.
