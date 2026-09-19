@@ -348,7 +348,10 @@ pinned against a fake RNode on a pseudo-terminal pair (`tests/rnode.rs`).
 `lora-phy` driver thread as the virtual chip on `spidev` and the GPIO
 character device, with the air for a medium; the driver thread is generic
 over the bus (`Watch`, `DriverHandle`), so only the bus changed. Neither has
-met a board. What the first board has to answer is in the pick-up list.
+met a board. What the first board has to answer is in the pick-up list. Gate:
+every non-container test, the hub baseline, and the full suite on the virtual
+SX1262 (20 of 20, 631 s) with the generic driver and the static musl build
+carrying the hardware crates. Upstream: https://github.com/lora-rs/lora-rs/pull/487.
 
 ### What to pick up next
 
