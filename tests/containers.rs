@@ -1423,3 +1423,93 @@ fn adversary_equivocating_opener_is_evidence_not_a_split() {
         assert!(result.endorsed);
     }
 }
+
+#[test]
+fn a_vessel_killed_inside_the_round_finishes_it_after_refloating() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // The sharpest test of the journal. The vessel is killed after it has cast
+    // its vote and heard the members before it in slot order, and brought back
+    // while the round is still going. Those earlier members are done
+    // transmitting; repair only asks after members heard since. If what the
+    // vessel admitted before dying is not on disk, it cannot finish the round
+    // it comes back into. It must: its own vote from the outbox, the votes it
+    // witnessed from the journal, the rest from the air.
+    let fleet = 5;
+    let mut sea = Sea::new("midround").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let ships = put_to_sea_with(&mut sea, fleet, &hub, &["--attempts", "3"]);
+    let casualty = &ships[2];
+
+    assert!(
+        casualty.await_log("\"sent\",\"stage\":\"binding\"", Duration::from_mins(2)),
+        "statek 2 nie oddal glosu"
+    );
+    let reports_before = casualty.reports();
+    let starts_before = casualty.starts();
+    casualty.sink();
+    casualty.refloat();
+
+    let recovered = casualty
+        .await_restart(starts_before, Duration::from_mins(1))
+        .expect("statek 2 nie wstal ponownie");
+    let after = casualty
+        .await_report(reports_before, Duration::from_mins(4))
+        .unwrap_or_else(|| {
+            for line in casualty
+                .logs()
+                .lines()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                note(&format!("    statek 2: {line}"));
+            }
+            panic!("statek 2 nie dokonczyl rundy, do ktorej wrocil");
+        });
+    let restored = casualty
+        .logs()
+        .lines()
+        .rev()
+        .find(|l| l.contains("witnessed_restored"))
+        .map_or(0, |l| field(l, "\"votes\":"));
+    let others = await_all(&ships[..2], Duration::from_mins(4))
+        .into_iter()
+        .chain(await_all(&ships[3..], Duration::from_mins(4)))
+        .collect::<Vec<_>>();
+    note(&format!(
+        "  zabity w trakcie: odzyskany_glos={recovered}, odtworzono {restored} przyjetych glosow, po powrocie poparc {} / prog {} -> {}",
+        after.supporters,
+        after.threshold,
+        if after.endorsed {
+            "ZATWIERDZONE"
+        } else {
+            "zablokowane"
+        }
+    ));
+    note_anomalies(&ships);
+
+    if after.supporters < fleet {
+        let logs = casualty.logs();
+        let tail: Vec<&str> = logs.lines().rev().take(30).collect();
+        for line in tail.into_iter().rev() {
+            note(&format!("    statek 2: {line}"));
+        }
+    }
+    assert!(
+        recovered,
+        "glos oddany przed smiercia musi zostac odzyskany"
+    );
+    assert!(restored >= 1, "przyjete glosy musza przezyc restart");
+    assert!(after.endorsed, "wrocil do zywej rundy i musi ja dokonczyc");
+    assert_eq!(after.supporters, fleet, "po powrocie ma komplet glosow");
+    for result in &others {
+        assert!(result.endorsed);
+        assert!(result.supporters >= result.threshold);
+    }
+}

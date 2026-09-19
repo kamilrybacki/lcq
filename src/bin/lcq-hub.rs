@@ -50,20 +50,26 @@ fn main() {
     let (sender, receiver) = channel::<Incoming>();
 
     let accepting = Arc::clone(&writers);
-    let fleet = options.fleet;
-    thread::spawn(move || accept_nodes(&listener, fleet, &accepting, &sender));
+    thread::spawn(move || accept_nodes(&listener, &accepting, &sender));
 
     relay(&receiver, &writers, &options);
 }
 
 /// Take `fleet` connections, each announcing its index, and read from each.
+/// Accept members for as long as the emulator runs.
+///
+/// Not "the first `fleet` of them": a member that restarts connects again, and
+/// an emulator that stopped listening once the fleet was complete would leave
+/// it with nothing to come back to. The first version did exactly that, and a
+/// refloated vessel spent thirty seconds failing to connect and died -- while
+/// the test watching it saw its start line, logged before the connection, and
+/// passed. A reconnecting member replaces its own dead socket.
 fn accept_nodes(
     listener: &TcpListener,
-    fleet: usize,
     writers: &Arc<Mutex<HashMap<usize, TcpStream>>>,
     sender: &Sender<Incoming>,
 ) {
-    for _ in 0..fleet {
+    loop {
         let Ok((stream, _)) = listener.accept() else {
             return;
         };

@@ -430,3 +430,58 @@ fn a_killed_process_leaves_a_journal_that_still_opens() {
         "reopening must have repaired the file to its whole records"
     );
 }
+
+#[test]
+fn a_witnessed_vote_survives_the_process_that_admitted_it() {
+    // A node that restarts inside a live round has to finish it, and the
+    // members it had already heard are done transmitting. What it admitted
+    // must therefore be on disk -- as the frame, so it can be verified again.
+    let scratch = Scratch::new("witness");
+    let path = scratch.file("journal.log");
+    {
+        let mut journal = open(&path);
+        journal
+            .witness("n3", b"sealed frame from three")
+            .expect("durable");
+        journal
+            .witness("n1", b"sealed frame from one")
+            .expect("durable");
+        journal
+            .witness("n3", b"a different frame from three")
+            .expect("repeat is fine");
+    }
+    let reopened = open(&path);
+    let mut seen: Vec<(String, Vec<u8>)> = reopened
+        .witnessed()
+        .map(|(a, f)| (a.to_string(), f.to_vec()))
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("n1".to_string(), b"sealed frame from one".to_vec()),
+            ("n3".to_string(), b"sealed frame from three".to_vec()),
+        ],
+        "one frame per author, the first one kept"
+    );
+}
+
+#[test]
+fn compaction_keeps_witnessed_votes() {
+    let scratch = Scratch::new("witness-compact");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    for n in 0..4u32 {
+        vote(&mut journal, n, u64::from(n) + 1).expect("vote");
+    }
+    journal.witness("n7", b"seven").expect("durable");
+    journal.witness("n8", b"eight").expect("durable");
+    journal.compact().expect("compaction");
+    let reopened = open(&path);
+    assert_eq!(reopened.witnessed().count(), 2);
+    assert!(
+        reopened
+            .witnessed()
+            .any(|(a, f)| a == "n7" && f == b"seven")
+    );
+}

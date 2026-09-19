@@ -70,6 +70,9 @@ enum Entry {
     Sequence { next: u64 },
     /// A frame that no longer needs sending: acknowledged, or expired.
     Retired { sequence: u64 },
+    /// A binding vote admitted from another member, kept as the frame it
+    /// arrived in so a restart can re-verify it rather than trust it.
+    Witnessed { author: String, bytes: Vec<u8> },
     /// A lock whose frame is already gone. Written only by compaction, which
     /// rewrites a state that already satisfies the lock-before-frame invariant.
     Lock { key: String },
@@ -117,6 +120,7 @@ struct State {
     locks: BTreeSet<String>,
     pending: BTreeMap<u64, OutgoingFrame>,
     next_sequence: u64,
+    witnessed: BTreeMap<String, Vec<u8>>,
 }
 
 impl State {
@@ -144,6 +148,9 @@ impl State {
             Entry::Sequence { next } => self.next_sequence = self.next_sequence.max(next),
             Entry::Retired { sequence } => {
                 self.pending.remove(&sequence);
+            }
+            Entry::Witnessed { author, bytes } => {
+                self.witnessed.entry(author).or_insert(bytes);
             }
         }
     }
@@ -253,6 +260,12 @@ impl LogJournal {
                 sequence: frame.sequence(),
                 bytes: frame.bytes().to_vec(),
                 expires_at: frame.expires_at().map(Timestamp::as_secs),
+            });
+        }
+        for (author, bytes) in &self.state.witnessed {
+            entries.push(Entry::Witnessed {
+                author: author.clone(),
+                bytes: bytes.clone(),
             });
         }
 
@@ -394,11 +407,38 @@ impl Journal for LogJournal {
         }
     }
 
+    fn witness(&mut self, author: &str, frame: &[u8]) -> Result<(), JournalError> {
+        if self.state.witnessed.contains_key(author) {
+            return Ok(());
+        }
+        self.append(&Entry::Witnessed {
+            author: String::from(author),
+            bytes: frame.to_vec(),
+        })?;
+        self.state
+            .witnessed
+            .insert(String::from(author), frame.to_vec());
+        Ok(())
+    }
+
+    fn witnessed(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.state
+            .witnessed
+            .iter()
+            .map(|(author, frame)| (author.as_str(), frame.as_slice()))
+    }
+
     fn snapshot(&self) -> JournalSnapshot {
         JournalSnapshot {
             vote_locks: self.state.locks.iter().map(|k| (k.clone(), 0)).collect(),
             pending: self.state.pending.values().cloned().collect(),
             next_sequence: self.state.next_sequence,
+            witnessed: self
+                .state
+                .witnessed
+                .iter()
+                .map(|(a, f)| (a.clone(), f.clone()))
+                .collect(),
         }
     }
 }

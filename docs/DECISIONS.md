@@ -791,3 +791,62 @@ Two adversaries at once, which the budget permits. An adversary that is also
 the majority of a partition. Evidence is still only kept locally. A compromised
 member can send a repair request with an empty list and cost every member one
 resend per round — bounded, and noted.
+
+---
+
+## D11 — A member killed inside a round comes back and finishes it
+
+**Decided and measured 2026-09-19.** The refloat test (D7) killed a vessel
+*after* the round and checked it did not vote again. This one kills it in the
+middle — after it has voted and heard the members before it in slot order — and
+brings it back while the round is still going. That is the sharpest test the
+durable journal can be given, and it failed four separate ways before it
+passed. Each was a real defect.
+
+### Witnessed votes are journalled
+
+A tally kept only in memory dies with the process. The members a restarted
+vessel had already heard are done transmitting, and it needs them most. Every
+binding vote admitted from another member is now written to the journal **as
+the frame it arrived in**, so the restarted vessel re-verifies the signature
+rather than trusting its earlier self. One per author. Compaction keeps them.
+On start they enter the same gate as votes that arrive too early: held until
+consultation closes, then offered to the state machine.
+
+### Four defects the test found, in the order it found them
+
+1. **The emulator stopped listening once the fleet was complete.** A refloated
+   vessel spent thirty seconds failing to connect and died — while the earlier
+   refloat test saw its start line, logged *before* the connection, and passed.
+   The emulator now accepts for as long as it runs; a reconnecting member
+   replaces its own dead socket.
+2. **Joining late closed consultation directly and skipped the drain.** The
+   restored votes sat in the held-vote buffer forever. Joining now leaves the
+   close to the main loop, which drains everything held.
+3. **A vessel's own vote was admitted only on "attempt one".** A member that
+   missed its slot had already spent an attempt before it first sent, and a
+   member back from a restart may never send again at all — the fleet had
+   acknowledged it — so it was the one member missing from its own tally. The
+   own vote is now admitted on the fact of first sending, and a recovered vote
+   is restored into the held buffer at start like any other.
+4. **Repair only asked after members it had heard since restarting.** The
+   member it needed had voted before the restart and never spoke again. A
+   repair request carries what is *held*, so asking after every manifest member
+   costs no bytes and an absent member simply sends no reply. Repair now asks
+   about everyone.
+
+### Measured
+
+Killed after casting its vote, refloated into the live round: recovered its
+vote, restored two witnessed votes, derived the anchor from the next frame it
+heard, closed, admitted the three it held in one tick, saw itself acknowledged
+and did not retransmit, asked for the one member it had never heard, received
+it in the first repair round — **five of five, endorsed**. The rest of the fleet
+unaffected.
+
+### What the test does not do
+
+It kills one vessel once, at one point in the round. Killing during the journal
+append itself is covered at the journal level by the every-offset truncation
+test, not end to end. Two vessels restarting at once, or one restarting twice,
+are not tried.

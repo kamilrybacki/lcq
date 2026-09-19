@@ -247,6 +247,13 @@ repair rounds after the scheduled vote, because per-link loss defeats a
 "somebody heard me" stop rule. Loss test measured five of five after; it was
 four of five before.
 
+### Killed inside the round (D11)
+
+Witnessed binding votes are journalled as frames and re-verified on restart. A
+vessel killed after voting and refloated into the live round finishes it, five
+of five. Four defects fixed on the way, including the emulator refusing
+reconnections -- which the earlier refloat test never noticed.
+
 ### What to pick up next
 
 1. **Equivocation on the trigger** (D6) — the one open blocker. Slots must

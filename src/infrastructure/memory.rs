@@ -22,6 +22,7 @@ pub struct MemoryJournal {
     locks: BTreeSet<String>,
     pending: BTreeMap<u64, OutgoingFrame>,
     next_sequence: u64,
+    witnessed: BTreeMap<String, alloc::vec::Vec<u8>>,
 }
 
 impl MemoryJournal {
@@ -36,6 +37,7 @@ impl MemoryJournal {
                 .map(|frame| (frame.sequence(), frame))
                 .collect(),
             next_sequence: snapshot.next_sequence,
+            witnessed: snapshot.witnessed.into_iter().collect(),
         }
     }
 }
@@ -86,11 +88,29 @@ impl Journal for MemoryJournal {
             .retain(|_, frame| frame.expires_at().is_none_or(|at| at >= now));
     }
 
+    fn witness(&mut self, author: &str, frame: &[u8]) -> Result<(), JournalError> {
+        self.witnessed
+            .entry(String::from(author))
+            .or_insert_with(|| frame.to_vec());
+        Ok(())
+    }
+
+    fn witnessed(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.witnessed
+            .iter()
+            .map(|(author, frame)| (author.as_str(), frame.as_slice()))
+    }
+
     fn snapshot(&self) -> JournalSnapshot {
         JournalSnapshot {
             vote_locks: self.locks.iter().map(|k| (k.clone(), 0)).collect(),
             pending: self.pending.values().cloned().collect(),
             next_sequence: self.next_sequence,
+            witnessed: self
+                .witnessed
+                .iter()
+                .map(|(a, f)| (a.clone(), f.clone()))
+                .collect(),
         }
     }
 }

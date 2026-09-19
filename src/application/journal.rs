@@ -103,6 +103,9 @@ pub struct JournalSnapshot {
     pub pending: Vec<OutgoingFrame>,
     /// The next sequence number that has never been handed out.
     pub next_sequence: u64,
+    /// `(author, sealed frame)` for every binding vote admitted from another
+    /// member.
+    pub witnessed: Vec<(alloc::string::String, Vec<u8>)>,
 }
 
 /// Durable safety state.
@@ -157,6 +160,25 @@ pub trait Journal {
     /// decide; it merely failed to get the decision out in time, and letting it
     /// decide again would be a second vote.
     fn drop_expired(&mut self, now: Timestamp);
+
+    /// Record a binding vote admitted from another member, as the frame it
+    /// arrived in.
+    ///
+    /// A tally kept only in memory dies with the process, and a node that
+    /// restarts inside a live round then cannot finish it: the members it had
+    /// already heard are done transmitting, and repair only asks after members
+    /// heard since. The frame is stored rather than the fact, so a restarted
+    /// node re-verifies the signature instead of trusting its earlier self.
+    /// One per author; a repeat is the same vote and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::NotDurable`] if the record could not be persisted. The
+    /// vote was still admitted; it merely will not survive a restart.
+    fn witness(&mut self, author: &str, frame: &[u8]) -> Result<(), JournalError>;
+
+    /// Binding votes admitted from others, as recorded by [`Journal::witness`].
+    fn witnessed(&self) -> impl Iterator<Item = (&str, &[u8])>;
 
     /// Everything that must survive a restart.
     fn snapshot(&self) -> JournalSnapshot;

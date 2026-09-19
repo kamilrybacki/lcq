@@ -191,10 +191,11 @@ fn main() {
     // acknowledgement costs eight bytes rather than a frame of its own.
     let mut heard = Heard::none();
     let mut acknowledged = false;
-    // Members heard at all, in any stage. A member that spoke in consultation
-    // and is absent from the binding tally is a gap worth asking about; one
-    // that never spoke may simply not be here.
-    let mut spoke: BTreeSet<usize> = BTreeSet::new();
+    // Whether this node has counted its own utterance for each stage. Keyed on
+    // the fact rather than on the attempt number: a member that missed its
+    // slot has already spent an attempt before it first sends, and a member
+    // that restarts resends from the outbox on what is, for it, attempt one.
+    let mut own_admitted = [false; 3];
     // Repair rounds this node has already asked in, the resend it owes, and
     // the round it last resent in -- one request and one resend per round.
     let mut nacked_rounds: u64 = 0;
@@ -227,6 +228,31 @@ fn main() {
     // offered again the moment consultation closes. Nothing about safety
     // changes, since the state machine checks it then exactly as it would have.
     let mut early: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    // Votes this node admitted in an earlier life. They go through the same
+    // gate as votes that arrive too early: held until consultation closes,
+    // then offered to the state machine, which verifies each again.
+    let mut witnessed_restored = 0usize;
+    for (author, bytes) in journal.witnessed() {
+        if let Some(index) = member_index(author) {
+            early.insert(index, bytes.to_vec());
+            witnessed_restored += 1;
+        }
+    }
+    // Our own recovered vote counts too. The send path admits a vote when it
+    // first goes out, but a member back from a restart may never send it again
+    // -- the fleet already acknowledged it -- and would then be the one member
+    // missing from its own tally. It goes through the same gate as the rest.
+    if recovered_vote && let Some(frame) = journal.pending().next() {
+        early.insert(options.index, frame.bytes().to_vec());
+        own_admitted[2] = true;
+    }
+    if witnessed_restored > 0 {
+        report(
+            &options,
+            &clock,
+            &format!("{{\"event\":\"witnessed_restored\",\"votes\":{witnessed_restored}}}"),
+        );
+    }
     // Adversary bookkeeping. Unused by an honest member.
     let mut equivocate_at: Option<Instant> = None;
     let mut captured: Option<Vec<u8>> = None;
@@ -372,19 +398,26 @@ fn main() {
                             late.author
                         ),
                     );
-                    // A binding vote heard this way must not be lost to the
-                    // phase check: close consultation first if the clock says
-                    // it is due, then admit the very frame that anchored us.
-                    if clock.certainly_after(subject.consultation_cutoff())
-                        && case.close_consultation(&clock).is_ok()
-                    {
-                        closed = true;
-                    }
+                    // The frame that anchored us is offered to the state
+                    // machine like any other. Consultation is NOT closed here:
+                    // the main loop closes it on its next turn and drains
+                    // everything being held -- votes restored from the journal,
+                    // votes that arrived too early, and this one if it was a
+                    // binding vote refused for arriving before the close. The
+                    // first version closed here directly and skipped that drain,
+                    // so a restarted member never counted what it had restored.
                     let learned = admit(
                         &frame, &subject, &manifest, &group, &mut case, &clock, &options,
                     );
+                    if let Some((from, _)) = learned.verified
+                        && learned.refused == Some(TransitionError::WrongStageForPhase)
+                        && learned.stage_index == Some(2)
+                    {
+                        early.insert(from, frame.clone());
+                    }
                     if let Some(from) = learned.binding_from {
                         heard.heard_from(from);
+                        let _ = journal.witness(&member_id(from), &frame);
                     }
                     if learned.acknowledges_us && !options.ignore_acks {
                         acknowledged = true;
@@ -490,6 +523,7 @@ fn main() {
                         );
                         if let Some(from) = learned.binding_from {
                             heard.heard_from(from);
+                            let _ = journal.witness(&member_id(from), &held);
                         }
                         if learned.acknowledges_us && !options.ignore_acks {
                             acknowledged = true;
@@ -613,7 +647,8 @@ fn main() {
                     // is missing from its own tally -- which happened to clear
                     // the threshold for a fleet of five and would not have for
                     // any other size.
-                    if attempts[index] == 1 {
+                    if !own_admitted[index] {
+                        own_admitted[index] = true;
                         let learned = admit(
                             &bytes, &subject, &manifest, &group, &mut case, &clock, &options,
                         );
@@ -660,9 +695,12 @@ fn main() {
                     + own_slot
         {
             nacked_rounds = round_index + 1;
-            let missing: Vec<usize> = spoke
-                .iter()
-                .copied()
+            // Everyone in the manifest this node has no binding vote from. Not
+            // just members heard from: a member that restarts has heard almost
+            // nobody, and the ones it needs most are done transmitting. Asking
+            // costs nothing extra -- the request carries what is HELD, so a
+            // member that is simply absent adds no bytes and sends no reply.
+            let missing: Vec<usize> = (0..options.fleet)
                 .filter(|m| *m != options.index && !heard.contains(*m))
                 .collect();
             if !missing.is_empty() {
@@ -748,7 +786,6 @@ fn main() {
             }
             if let Some((from, sequence)) = learned.verified {
                 last_seen[from] = Some(sequence);
-                spoke.insert(from);
                 if learned.refused == Some(TransitionError::WrongStageForPhase)
                     && learned.stage_index == Some(2)
                 {
@@ -813,6 +850,15 @@ fn main() {
             }
             if let Some(from) = learned.binding_from {
                 heard.heard_from(from);
+                if let Err(error) = journal.witness(&member_id(from), &frame) {
+                    report(
+                        &options,
+                        &clock,
+                        &format!(
+                            "{{\"event\":\"not_durable\",\"what\":\"witness\",\"why\":\"{error}\"}}"
+                        ),
+                    );
+                }
             }
             // Somebody reported hearing us, so repeating ourselves would buy
             // nothing. Advisory only: a liar can silence one member per round,
@@ -1070,10 +1116,14 @@ fn late_anchor(
     let (header_author, header_sequence, plain) = open_frame(group, sealed).ok()?;
     let frame = decode_compact(&plain).ok()?;
     let envelope = frame.envelope();
+    // A repair request is sent in its author's slot of a later window, so it
+    // implies an anchor off by whole windows -- which the slot schedule cannot
+    // tell from the right one, and which the modulo-window split check does
+    // not mistake for a foreign anchor. Good enough to join on.
     let stage_index = match envelope.stage() {
         1 => 0,
         2 => 1,
-        3 => 2,
+        3 | NACK_STAGE => 2,
         _ => return None,
     };
     let author = usize::from(envelope.author_index());
@@ -1454,6 +1504,11 @@ const fn stage_name(stage: Stage) -> &'static str {
         Stage::Consultation => "consultation",
         Stage::BindingSupport => "binding",
     }
+}
+
+/// The index a member id names, if it is one this node issues.
+fn member_index(id: &str) -> Option<usize> {
+    id.strip_prefix('n')?.parse().ok()
 }
 
 fn member_id(index: usize) -> String {
