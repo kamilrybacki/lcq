@@ -444,3 +444,68 @@ That combination keeps safety unconditional and degrades liveness gracefully,
 which is the same shape as every other trade in this protocol. Until it is
 built, slotted access remains an airtime optimisation with a known liveness
 hole, and random contention stays the default.
+
+---
+
+## D7 — The protocol across real processes, and four things only that could show
+
+**Recorded 2026-09-19.** `src/bin/lcq-node.rs`, `src/bin/lcq-hub.rs`,
+`tests/multiprocess.rs`.
+
+Every earlier result came from one process, where nodes shared a heap, a
+scheduler and — until D6 — a clock. Each member is now its own operating-system
+process with its own journal on disk, its own clock and its own error, reaching
+the others only through a channel emulator that enforces the two things that
+make a radio a radio: **one frame at a time, and frames take time**.
+
+Five processes, slotted access, no loss: **zero collisions, sixteen frames, and
+all five independently reach the same verdict**. Disagreement there would mean
+the quorum depends on who you ask, which is the failure the whole design exists
+to prevent.
+
+### The anchor is when the trigger *ends*
+
+D6 forced a trigger anchor. Implementing it across processes exposed a detail a
+single process cannot have: the originator knows its trigger at the instant it
+starts sending, and everybody else knows it only once the frame has finished
+arriving. An originator counting from its own first symbol therefore runs a
+whole airtime ahead of the fleet — and lands its slot *k* on top of everyone
+else's slot *k−1*. The shared instant is the end of the trigger, not its start.
+
+### A node must not miss its own slot because it is busy listening
+
+The first version verified received frames before checking whether it was time
+to transmit. Verifying an ed25519 signature is not free, and in a debug build it
+is slow enough to push a send past its slot and into the next member's. Send
+checks now come first and at most one frame is read per turn. This is not a test
+artefact: a real node on a constrained CPU has the same problem, and a node that
+loses its slot to its own workload collides with whoever comes next.
+
+### A node must count its own vote
+
+The emulator does not echo, so a member heard everyone except itself. For a
+fleet of five that still cleared a threshold of four, which is exactly the kind
+of accident that survives review. A node needs no radio to know its own
+utterance.
+
+### Scaling amplifies real jitter by the scale factor
+
+The protocol's shortest interval is five minutes, so an honest multi-process
+test needs a clock faster than wall time. The cost is that every real-world
+jitter is multiplied too. At scale 100 a 200 ms guard interval is 2 ms of wall
+time — below the Linux scheduler's noise — and the schedule falls apart for
+reasons that have nothing to do with the protocol. At scale 20 the same guard
+is 10 ms and it holds.
+
+**The usable scale is bounded by the guard interval divided by the host's
+scheduling jitter.** A result obtained above that bound is measuring the host.
+This is a limit on the method, and it is why these tests run at 20 and take
+about ninety seconds.
+
+### What this still does not do
+
+No radio hardware. The emulator models occupancy and collisions but runs over
+loopback, so every link is perfect and equally strong — there is no capture
+effect to be had, and the propagation model of `sim::phy` is not in the path.
+Nodes send once per stage: there is no retry policy here, because without an
+acknowledgement on the air there is nothing to retry against (D4).

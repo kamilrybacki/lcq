@@ -225,6 +225,13 @@ the GitHub remote is still named `lorai`.
 * Cross-member nonce collision under the shared group key (critical).
 * Frames that could not be opened, because the nonce lived inside the ciphertext.
 
+### M7 done: the protocol across real processes
+
+`lcq-node` and `lcq-hub` are real binaries; `tests/multiprocess.rs` runs five
+node processes against a channel emulator, kills one and restarts it. See
+`DECISIONS.md` D7 for the four findings that only separate processes could
+produce, including the bound on how far the clock may be scaled.
+
 ### What to pick up next
 
 1. **Equivocation on the trigger** (D6) — the one open blocker. Slots must
@@ -234,8 +241,9 @@ the GitHub remote is still named `lorai`.
 2. **Acknowledgement on the air** (D4) — worth roughly 4.5x the airtime. Nothing
    carries the fact today; `Journal::acknowledge` exists but no frame says it.
 3. **Short case reference** (D4) — 23 % off every frame, no security traded.
-4. Still unexercised by any simulation: `RadioQueue` (priority, dedup, distress
-   burst). Every member's `Case` other than the observer's is also not driven,
-   so `AlreadyVoted` is only tested at the journal, not the state machine.
+4. Still unexercised: `RadioQueue` (priority, dedup, distress burst). The
+   multi-process run does drive every member's own `Case`, so that gap is
+   closed; what remains is the queue and any retry policy, which waits on the
+   acknowledgement design.
 5. From review: per-sender replay windows with retention limits, cheap rejection
    of senders outside the manifest.
