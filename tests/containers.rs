@@ -1635,3 +1635,60 @@ fn adversaries_two_of_five_is_the_whole_fault_budget_and_safety_still_holds() {
         );
     }
 }
+
+#[test]
+fn geometry_puts_the_far_ends_of_a_line_out_of_each_others_hearing() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // Five vessels eight kilometres apart. The two ends are thirty-two
+    // kilometres from each other, past the radio horizon for these masts, so
+    // each is deaf to the other; every other pair is within range. The
+    // emulator now decides reception per receiver from the propagation model,
+    // so this is a partial partition drawn by physics rather than by a flag.
+    // Everyone still reaches the threshold; the two ends each hold one vote
+    // fewer than the middle, and no amount of repair can fetch what cannot be
+    // heard.
+    let fleet = 5;
+    let mut sea = Sea::new("geometry").expect("sea");
+    let hub = sea.launch_hub_with(fleet, &["--spacing-m", "8000"]);
+    let ships = put_to_sea_with(&mut sea, fleet, &hub, &["--attempts", "2"]);
+    let finals = await_all(&ships, Duration::from_mins(4));
+
+    let weak = Command::new("docker")
+        .args(["logs", &hub])
+        .output()
+        .map_or(0, |o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| l.contains("\"why\":\"weak\""))
+                .count()
+        });
+    let tallies: Vec<usize> = finals.iter().map(|f| f.supporters).collect();
+    note(&format!(
+        "  linia 5 x 8 km: {weak} ramek ponizej czulosci, tally {tallies:?}, prog {}",
+        finals[0].threshold
+    ));
+    note_anomalies(&ships);
+
+    assert!(weak >= 2, "the two ends must be inaudible to each other");
+    for (index, result) in finals.iter().enumerate() {
+        assert!(result.endorsed, "statek {index} nie zatwierdzil");
+    }
+    assert_eq!(
+        finals[0].supporters, 4,
+        "koniec linii nie slyszy drugiego konca"
+    );
+    assert_eq!(
+        finals[4].supporters, 4,
+        "koniec linii nie slyszy drugiego konca"
+    );
+    for (index, result) in finals.iter().enumerate().take(4).skip(1) {
+        assert_eq!(
+            result.supporters, 5,
+            "statek {index}: srodek slyszy wszystkich"
+        );
+    }
+}

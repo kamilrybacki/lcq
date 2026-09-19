@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lcq::sim::airtime_ms;
+use lcq::sim::{Link, SENSITIVITY_DBM, TX_POWER_DBM, airtime_ms, capture_wins, rssi_dbm};
 
 /// One frame arriving from a node.
 struct Incoming {
@@ -34,8 +34,16 @@ struct Incoming {
 struct InFlight {
     from: usize,
     bytes: Vec<u8>,
+    starts_at: Instant,
     ends_at: Instant,
+    /// Settled: every receiver has been told, or not, and only the overlap
+    /// record remains.
+    done: bool,
 }
+
+/// Received power when no geometry is configured: the same for every pair, so
+/// nothing can ever capture over anything and every overlap destroys both.
+const NOMINAL_RSSI_DBM: f64 = -80.0;
 
 fn main() {
     let options = Options::from_args();
@@ -114,75 +122,106 @@ fn relay(
     writers: &Arc<Mutex<HashMap<usize, TcpStream>>>,
     options: &Options,
 ) {
-    let mut in_flight: Option<InFlight> = None;
+    // Every frame in flight, plus frames recently ended, because a frame is
+    // judged against everything that overlapped it -- and a frame that ends
+    // later may have started before this one ended.
+    let mut frames: Vec<InFlight> = Vec::new();
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
 
     loop {
-        // Wait only as long as the frame in flight still has to run.
-        let wait = in_flight.as_ref().map_or(Duration::from_millis(250), |f| {
-            f.ends_at.saturating_duration_since(Instant::now())
-        });
+        let now = Instant::now();
+        let wait = frames
+            .iter()
+            .filter(|f| !f.done)
+            .map(|f| f.ends_at.saturating_duration_since(now))
+            .min()
+            .unwrap_or(Duration::from_millis(250));
 
         match receiver.recv_timeout(wait) {
             Ok(incoming) => {
                 let air = Duration::from_millis(
                     airtime_ms(incoming.bytes.len()) / u64::from(options.scale).max(1),
                 );
-                let ends_at = incoming.at + air;
-                if let Some(current) = in_flight.take() {
-                    if current.ends_at > incoming.at {
-                        // Overlap. Neither survives: without a difference in
-                        // received strength there is nothing to capture with,
-                        // and two processes on one loopback have none.
-                        options.log(&format!(
-                            "{{\"event\":\"collision\",\"a\":{},\"b\":{}}}",
-                            current.from, incoming.from
-                        ));
-                        in_flight = Some(InFlight {
-                            from: usize::MAX,
-                            bytes: Vec::new(),
-                            ends_at: ends_at.max(current.ends_at),
-                        });
-                        continue;
-                    }
-                    deliver(&current, writers, options, &mut seed);
-                }
-                in_flight = Some(InFlight {
+                frames.push(InFlight {
                     from: incoming.from,
                     bytes: incoming.bytes,
-                    ends_at,
+                    starts_at: incoming.at,
+                    ends_at: incoming.at + air,
+                    done: false,
                 });
             }
-            Err(RecvTimeoutError::Timeout) => {
-                if let Some(current) = in_flight.take() {
-                    deliver(&current, writers, options, &mut seed);
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
+
+        // Settle every frame that has finished. A frame is decided when it
+        // ends, per receiver, against everything that overlapped it.
+        let now = Instant::now();
+        let ended: Vec<usize> = frames
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.done && f.ends_at <= now)
+            .map(|(i, _)| i)
+            .collect();
+        for index in ended {
+            settle(index, &frames, writers, options, &mut seed);
+            frames[index].done = true;
+        }
+        // Keep settled frames a little longer than any frame can last, so a
+        // frame that started during one of them still finds it.
+        frames.retain(|f| !f.done || f.ends_at + Duration::from_secs(5) > now);
     }
 }
 
-/// Hand a finished frame to everyone else who can hear it.
-fn deliver(
-    frame: &InFlight,
+/// Decide a finished frame's fate at every receiver, and deliver where it won.
+///
+/// Three ways to lose it. Too weak: the receiver is beyond range. Collided:
+/// another frame overlapped it in time and this one was not enough stronger
+/// to be demodulated over it -- the capture effect, which needs a difference
+/// in received power and so never happens without geometry. Lost: the
+/// configured residual loss. Each is per receiver, because reception is.
+fn settle(
+    index: usize,
+    frames: &[InFlight],
     writers: &Arc<Mutex<HashMap<usize, TcpStream>>>,
     options: &Options,
     seed: &mut u64,
 ) {
-    if frame.from == usize::MAX {
-        // The wreckage of a collision. Nothing to deliver.
-        return;
-    }
+    let frame = &frames[index];
+    let overlappers: Vec<&InFlight> = frames
+        .iter()
+        .enumerate()
+        .filter(|(i, o)| *i != index && o.starts_at < frame.ends_at && frame.starts_at < o.ends_at)
+        .map(|(_, o)| o)
+        .collect();
+
     let mut guard = writers.lock().expect("lock");
     let targets: Vec<usize> = guard.keys().copied().collect();
+    let mut delivered_to = 0usize;
     for target in targets {
         if target == frame.from || !options.reaches(frame.from, target) {
             continue;
         }
+        let power = options.rssi(frame.from, target);
+        if power < SENSITIVITY_DBM {
+            options.log(&format!(
+                "{{\"event\":\"lost\",\"from\":{},\"to\":{target},\"why\":\"weak\",\"rssi\":{power:.1}}}",
+                frame.from
+            ));
+            continue;
+        }
+        if let Some(other) = overlappers.iter().find(|o| {
+            options.reaches(o.from, target) && !capture_wins(power, options.rssi(o.from, target))
+        }) {
+            options.log(&format!(
+                "{{\"event\":\"collision\",\"a\":{},\"b\":{},\"at\":{target}}}",
+                frame.from, other.from
+            ));
+            continue;
+        }
         if options.loss > 0.0 && next_f64(seed) < options.loss {
             options.log(&format!(
-                "{{\"event\":\"lost\",\"from\":{},\"to\":{target}}}",
+                "{{\"event\":\"lost\",\"from\":{},\"to\":{target},\"why\":\"loss\"}}",
                 frame.from
             ));
             continue;
@@ -193,13 +232,16 @@ fn deliver(
                 continue;
             }
             let _ = stream.flush();
+            delivered_to += 1;
         }
     }
-    options.log(&format!(
-        "{{\"event\":\"delivered\",\"from\":{},\"bytes\":{}}}",
-        frame.from,
-        frame.bytes.len()
-    ));
+    if delivered_to > 0 {
+        options.log(&format!(
+            "{{\"event\":\"delivered\",\"from\":{},\"bytes\":{},\"to\":{delivered_to}}}",
+            frame.from,
+            frame.bytes.len()
+        ));
+    }
 }
 
 fn next_f64(seed: &mut u64) -> f64 {
@@ -230,6 +272,12 @@ struct Options {
     /// rather than from start so it covers the opening whenever it happens.
     isolate_ms: u64,
     first_frame_at: std::sync::Mutex<Option<Instant>>,
+    /// Members strung out in a line this far apart, in metres. Turns on the
+    /// two-ray path-loss model from `lcq::sim::phy`: far members fall below
+    /// sensitivity, and a near member can be demodulated over a distant one.
+    /// Without it every pair is equally loud and there is no geometry to
+    /// speak of.
+    spacing_m: Option<f64>,
 }
 
 impl Options {
@@ -255,6 +303,19 @@ impl Options {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
             first_frame_at: std::sync::Mutex::new(None),
+            spacing_m: value("--spacing-m").and_then(|v| v.parse().ok()),
+        }
+    }
+
+    /// Received power at `to` of a frame from `from`, in dBm.
+    fn rssi(&self, from: usize, to: usize) -> f64 {
+        match self.spacing_m {
+            None => NOMINAL_RSSI_DBM,
+            Some(spacing) => {
+                #[allow(clippy::cast_precision_loss)]
+                let distance = spacing * (from.abs_diff(to) as f64);
+                rssi_dbm(&Link::new(distance), TX_POWER_DBM)
+            }
         }
     }
 

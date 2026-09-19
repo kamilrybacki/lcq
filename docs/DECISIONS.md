@@ -901,3 +901,55 @@ states the safety property without the model — however the history goes, the
 supporters are distinct members each of whom had a supporting binding vote
 admitted, and no dissenter is among them — so the claim does not rest on the
 model being right.
+
+---
+
+## D14 — The emulator decides reception per receiver, and the suite's flake rate is measured
+
+**Decided and measured 2026-09-19.**
+
+### Reception is per receiver
+
+The channel emulator used to hold one frame at a time and destroy any two that
+overlapped, for everybody. That is the right model for a loopback where every
+pair is equally loud, and it made the propagation model in `sim::phy` --
+two-ray path loss, sensitivity, capture -- something only the single-process
+simulator ever exercised.
+
+`lcq-hub --spacing-m` strings the members out in a line and the emulator now
+settles each frame **when it ends, per receiver**: below sensitivity it is too
+weak; overlapped by a frame it is not six decibels stronger than, it is
+collided; otherwise it is delivered, minus the configured residual loss. Without
+geometry every pair is equally loud, nothing can capture over anything and
+every overlap destroys both frames -- exactly the old behaviour, which the
+baseline and split tests confirm unchanged.
+
+Measured: five vessels eight kilometres apart, so the two ends are thirty-two
+kilometres from each other and past the radio horizon for these masts. Fourteen
+frames fell below sensitivity, all between the two ends. The tally came out
+**[4, 5, 5, 5, 4]**: each end is deaf to the other, the middle hears everyone,
+everyone reaches the threshold of four. A partial partition drawn by physics
+rather than by a flag -- and one that repair cannot mend, however many rounds,
+because a resend to a receiver past the horizon is as inaudible as the first.
+
+### Flake rate
+
+Timing-based tests deserve a number. The full container suite -- eighteen
+scenarios at the time, including skewed clocks, isolated halves, thirty per
+cent loss, six adversaries and two restarts -- was run three times in a row
+with nothing else on the machine: **54 of 54 passed, zero collisions**.
+
+The one failure seen earlier that day, a twelve-vessel run where one member
+counted eleven, happened while a build was running alongside. D7 already
+records that contention for a core is what destroys a slot schedule, and it
+did: the run took 26 s where an idle machine takes 22. It was the host, not the
+protocol, and the way to know that was to measure in isolation.
+
+### What the emulator still is not
+
+Loopback with arithmetic on top. Path loss is the textbook two-ray model over
+assumed geometry; there is no fading in the emulator (the single-process
+simulator has Rician fading, the emulator is kept deterministic so a failure
+replays), no sea state, no mast sway, no traffic from outside the fleet. It
+distinguishes a plausible link from a hopeless one. Nothing here supports a
+claim about real maritime range.

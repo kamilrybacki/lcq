@@ -254,6 +254,14 @@ vessel killed after voting and refloated into the live round finishes it, five
 of five. Four defects fixed on the way, including the emulator refusing
 reconnections -- which the earlier refloat test never noticed.
 
+### Airtime, model tests, two adversaries, geometry (D12-D14)
+
+The node meters its own airtime. The state machine agrees with a reference
+model over 512 random histories. Two faulty members of five -- the whole budget
+-- leave safety intact. The emulator decides reception per receiver from the
+propagation model, so a line of vessels has real geometry. Flake rate measured:
+54 of 54 container tests in three isolated runs.
+
 ### What to pick up next
 
 1. **Equivocation on the trigger** (D6) — the one open blocker. Slots must
@@ -263,9 +271,8 @@ reconnections -- which the earlier refloat test never noticed.
 2. **Acknowledgement on the air** (D4) — worth roughly 4.5x the airtime. Nothing
    carries the fact today; `Journal::acknowledge` exists but no frame says it.
 3. **Short case reference** (D4) — 23 % off every frame, no security traded.
-4. Still unexercised: `RadioQueue` (priority, dedup, distress burst). The
-   multi-process run does drive every member's own `Case`, so that gap is
-   closed; what remains is the queue and any retry policy, which waits on the
-   acknowledgement design.
+4. Still unexercised: `RadioQueue` (priority, dedup, distress burst) -- the
+   node has its own send loop and never uses it. Either the node adopts it or
+   it is removed; a module nothing runs is a liability.
 5. From review: per-sender replay windows with retention limits, cheap rejection
    of senders outside the manifest.
