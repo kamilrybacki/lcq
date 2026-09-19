@@ -455,14 +455,16 @@ fn the_emulator_holds_the_channel_for_one_frame_at_a_time() {
         })
         .collect();
     std::thread::sleep(Duration::from_secs(2));
-    for running in &mut nodes {
-        running.kill();
-    }
-    // The listener is closed by now -- the emulator stops accepting once the
-    // fleet is complete -- so what is checked is that the process survived a
-    // contended round rather than deadlocking or dying on it.
+    // Checked while the fleet is still on the air. The emulator exits, and
+    // should, once every member has gone -- its channel has no senders left --
+    // so asserting on it after the kill below was a race the test used to win
+    // by a few milliseconds. What is being checked is that a contended round
+    // neither deadlocked the emulator nor killed it.
     assert!(
         hub.child.try_wait().expect("hub status").is_none(),
         "the emulator did not survive a contended round"
     );
+    for running in &mut nodes {
+        running.kill();
+    }
 }

@@ -454,6 +454,57 @@ fn put_to_sea_with(sea: &mut Sea, fleet: usize, hub: &str, extra: &[&str]) -> Ve
     ships
 }
 
+/// Put a fleet to sea with one compromised member.
+///
+/// Everybody gets `common`; the member at `bad` also gets `bad_args`. Launch
+/// order is the usual one -- everyone but the opener first, confirmed
+/// listening, then the opener -- so the only thing different from an honest
+/// run is what the compromised member does.
+fn put_to_sea_with_adversary(
+    sea: &mut Sea,
+    fleet: usize,
+    hub: &str,
+    common: &[&str],
+    bad: usize,
+    bad_args: &[&str],
+) -> Vec<Ship> {
+    let args_for = |index: usize| -> Vec<&str> {
+        let mut args: Vec<&str> = common.to_vec();
+        if index == bad {
+            args.extend_from_slice(bad_args);
+        }
+        args
+    };
+    let mut ships: Vec<Ship> = (1..fleet)
+        .map(|i| sea.launch_ship_with(i, fleet, hub, false, &args_for(i)))
+        .collect();
+    for ship in &ships {
+        assert!(
+            ship.await_log("\"start\"", Duration::from_mins(1)),
+            "jednostka {} nie wstala",
+            ship.index
+        );
+    }
+    ships.insert(0, sea.launch_ship_with(0, fleet, hub, true, &args_for(0)));
+    ships
+}
+
+/// How many of a vessel's log lines contain `needle`.
+fn count_in_log(ship: &Ship, needle: &str) -> usize {
+    ship.logs().lines().filter(|l| l.contains(needle)).count()
+}
+
+/// Wait for every vessel's verdict.
+fn await_all(ships: &[Ship], within: Duration) -> Vec<Final> {
+    ships
+        .iter()
+        .map(|ship| {
+            ship.await_final(within)
+                .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
+        })
+        .collect()
+}
+
 /// What a vessel concluded.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -802,6 +853,18 @@ fn acknowledgement_stops_the_fleet_repeating_itself() {
         heard_attempts < deaf_attempts,
         "potwierdzenia musza zmniejszyc liczbe prob: {heard_attempts} wobec {deaf_attempts}"
     );
+    // An honest fleet retransmitting must never mistake its own retries for
+    // a split: the timing check used to, and a fleet that did would leave its
+    // slots for random retries on every lossy round.
+    note_anomalies(&hearing);
+    for ship in &hearing {
+        assert_eq!(
+            count_in_log(ship, "\"event\":\"split\""),
+            0,
+            "statek {} oglosil split w uczciwej flocie",
+            ship.index
+        );
+    }
     assert!(
         acknowledged > 0,
         "nikt nie zobaczyl wlasnego bitu w cudzej ramce"
@@ -902,11 +965,25 @@ fn a_lossy_channel_is_survived_by_retransmission() {
         .iter()
         .filter(|s| s.logs().contains("\"by\":\"derived\""))
         .count();
+    let nacks: usize = ships.iter().map(|s| count_in_log(s, "\"nack\"")).sum();
+    let repairs: usize = ships.iter().map(|s| count_in_log(s, "\"repaired\"")).sum();
     note(&format!(
-        "  30% strat: {attempts} prob glosu, {late} jednostek dolaczylo bez wyzwalacza"
+        "  30% strat: {attempts} prob glosu, {late} jednostek dolaczylo bez wyzwalacza, {nacks} zadan naprawy, {repairs} powtorzen na zadanie"
     ));
 
     assert!(attempts > fleet, "losses must have forced retransmissions");
+    // An honest fleet retransmitting must never mistake its own retries for
+    // a split: the timing check used to, and a fleet that did would leave its
+    // slots for random retries on every lossy round.
+    note_anomalies(&ships);
+    for ship in &ships {
+        assert_eq!(
+            count_in_log(ship, "\"event\":\"split\""),
+            0,
+            "statek {} oglosil split w uczciwej flocie",
+            ship.index
+        );
+    }
     for (index, result) in finals.iter().enumerate() {
         assert!(
             result.supporters >= result.threshold,
@@ -1040,5 +1117,309 @@ fn two_openings_of_one_subject_are_a_split_the_fleet_survives() {
             result.threshold
         );
         assert!(result.endorsed, "statek {index} nie zatwierdzil");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One compromised member per run. The fault budget allows two of five; one is
+// enough to exercise each defence, and keeps the cause of any failure single.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn adversary_forger_holds_the_group_key_and_counts_for_nothing() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    let fleet = 5;
+    let mut sea = Sea::new("forge").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let ships = put_to_sea_with_adversary(&mut sea, fleet, &hub, &[], 4, &["--adversary", "forge"]);
+    let finals = await_all(&ships, Duration::from_mins(3));
+    let refusals: usize = ships[..4]
+        .iter()
+        .map(|s| count_in_log(s, "\"why\":\"signature\""))
+        .sum();
+    note(&format!(
+        "  falszerz: {refusals} odmow podpisu u uczciwych, poparc {} / prog {}",
+        finals[0].supporters, finals[0].threshold
+    ));
+    note_anomalies(&ships);
+
+    assert!(refusals >= 4, "kazdy uczciwy musi odrzucic falszerza");
+    for (index, result) in finals.iter().enumerate().take(4) {
+        assert_eq!(
+            result.supporters, 4,
+            "statek {index}: falszerz nie moze sie liczyc"
+        );
+        assert!(result.endorsed, "czterech uczciwych to prog");
+    }
+}
+
+#[test]
+fn adversary_double_voter_is_counted_exactly_once() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // The member ignores its own journal and casts a second, contradicting
+    // vote. The lock is the honest member's discipline; what protects the
+    // tally is every receiver's state machine refusing a second binding vote
+    // from an author it already has one from.
+    let fleet = 5;
+    let mut sea = Sea::new("double").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let ships = put_to_sea_with_adversary(
+        &mut sea,
+        fleet,
+        &hub,
+        &["--attempts", "2", "--ignore-acks"],
+        4,
+        &["--adversary", "double-vote"],
+    );
+    let finals = await_all(&ships, Duration::from_mins(3));
+    let second_votes_refused: Vec<usize> = ships[..4]
+        .iter()
+        .map(|s| {
+            count_in_log(
+                s,
+                "\"from\":4,\"why\":\"author already cast a binding vote\"",
+            )
+        })
+        .collect();
+    note(&format!(
+        "  podwojny glos: odmowy drugiego glosu u uczciwych {second_votes_refused:?}, poparc {}",
+        finals[0].supporters
+    ));
+    note_anomalies(&ships);
+
+    for (index, refused) in second_votes_refused.iter().enumerate() {
+        assert!(*refused >= 1, "statek {index} nie odrzucil drugiego glosu");
+    }
+    for (index, result) in finals.iter().enumerate().take(4) {
+        assert_eq!(
+            result.supporters, 5,
+            "statek {index}: podwojny glos liczy sie raz"
+        );
+        assert!(result.endorsed);
+    }
+}
+
+#[test]
+fn adversary_lying_about_acknowledgements_cannot_inflate_a_tally() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // Under loss, a member that claims to have heard everyone silences honest
+    // members whose votes were in fact lost -- they stop retrying. That is the
+    // documented liveness cost of an advisory bitmap. What must not happen is
+    // any tally counting a vote its owner never received.
+    let fleet = 5;
+    let mut sea = Sea::new("liar").expect("sea");
+    let hub = sea.launch_hub_with(fleet, &["--loss", "0.3"]);
+    let ships = put_to_sea_with_adversary(
+        &mut sea,
+        fleet,
+        &hub,
+        &["--attempts", "4"],
+        4,
+        &["--adversary", "lie-acks"],
+    );
+    let finals = await_all(&ships, Duration::from_mins(4));
+    let endorsed = finals.iter().filter(|f| f.endorsed).count();
+    let silenced = finals[..4]
+        .iter()
+        .filter(|f| f.acknowledged && f.binding_attempts == 1)
+        .count();
+    note(&format!(
+        "  klamca w potwierdzeniach przy 30% strat: {endorsed}/{fleet} zatwierdzilo, {silenced} uczciwych przestalo powtarzac po jednej probie"
+    ));
+    note_anomalies(&ships);
+
+    for (index, result) in finals.iter().enumerate() {
+        assert!(result.supporters <= fleet);
+        assert!(
+            !result.endorsed || result.supporters >= result.threshold,
+            "statek {index} zatwierdzil ponizej progu"
+        );
+    }
+}
+
+#[test]
+fn adversary_jamming_one_slot_blocks_the_fleet_but_fabricates_nothing() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // The member transmits junk in the next member's binding slot every window
+    // and votes for nothing itself. Two of five members are then out -- the
+    // jammed one cannot get through in its slot, the jammer abstains -- and
+    // three is below the threshold of four. Blocking is the correct outcome
+    // and the known liveness limit of a slot schedule (D3, D6). What matters
+    // is that nobody approves.
+    let fleet = 5;
+    let mut sea = Sea::new("jam").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let ships = put_to_sea_with_adversary(
+        &mut sea,
+        fleet,
+        &hub,
+        &["--attempts", "3"],
+        4,
+        &["--adversary", "jam"],
+    );
+    let finals = await_all(&ships, Duration::from_mins(4));
+    let collisions = Sea::collisions(&hub);
+    let jams = count_in_log(&ships[4], "\"jammed\"");
+    note(&format!(
+        "  zagluszacz: {jams} zagluszen, {collisions} zderzen, statek 0 potwierdzony={}, poparc {} / prog {}",
+        finals[0].acknowledged, finals[1].supporters, finals[1].threshold
+    ));
+    note_anomalies(&ships);
+
+    assert!(
+        jams >= 2 && collisions >= 2,
+        "zagluszanie musi zderzac ramki"
+    );
+    assert!(
+        !finals[0].acknowledged,
+        "zagluszony czlonek nie mogl zostac uslyszany"
+    );
+    // Four members cast a binding vote: 0, 1, 2 and 3. The jammer cast none.
+    // Nobody may count more than those four, whatever it heard.
+    for (index, result) in finals.iter().enumerate() {
+        assert!(
+            result.supporters <= 4,
+            "statek {index} policzyl glos, ktorego nikt nie oddal"
+        );
+    }
+    // The three who could hear each other but not the jammed member are one
+    // short of the threshold and block. That is the known liveness limit of a
+    // slot schedule under targeted jamming (D3, D6).
+    for (index, result) in finals.iter().enumerate().skip(1) {
+        assert!(
+            !result.endorsed,
+            "statek {index} zatwierdzil, slyszac trzech"
+        );
+        assert_eq!(
+            result.supporters, 3,
+            "statek {index} policzyl {}",
+            result.supporters
+        );
+    }
+    // The jammed member itself heard the other three and holds its own vote:
+    // four genuine signatures, which IS a quorum. Jamming cannot make anyone
+    // fabricate a vote; what it can do is leave one member holding a verdict
+    // the rest of the fleet cannot yet see. Store-and-forward is the answer to
+    // that, not a different tally.
+    assert_eq!(finals[0].supporters, 4);
+    assert!(
+        finals[0].endorsed,
+        "zagluszony trzyma cztery prawdziwe podpisy"
+    );
+}
+
+#[test]
+fn adversary_replayed_frames_are_dropped_before_verification() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    let fleet = 5;
+    let mut sea = Sea::new("replay").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    // A replay is not free: it occupies the air, and whichever binding slot it
+    // lands on collides. Three attempts, so an honest member whose slot was
+    // hit gets through on the next window. What is being checked is that no
+    // receiver spends a signature verification on a frame it already had.
+    let ships = put_to_sea_with_adversary(
+        &mut sea,
+        fleet,
+        &hub,
+        &["--attempts", "3"],
+        4,
+        &["--adversary", "replay"],
+    );
+    let finals = await_all(&ships, Duration::from_mins(4));
+    let replayed = count_in_log(&ships[4], "\"replayed\"");
+    let dropped: usize = ships[..4]
+        .iter()
+        .map(|s| count_in_log(s, "replay_dropped"))
+        .sum();
+    note(&format!(
+        "  powtarzacz: {replayed} powtorzen, {dropped} odrzucen u uczciwych, poparc {}",
+        finals[0].supporters
+    ));
+    note_anomalies(&ships);
+
+    assert!(replayed >= 1, "powtarzacz nic nie powtorzyl");
+    assert!(
+        dropped >= replayed,
+        "kazde powtorzenie musi zostac odrzucone u kazdego, kto je slyszal"
+    );
+    for (index, result) in finals.iter().enumerate() {
+        assert!(
+            result.supporters >= result.threshold,
+            "statek {index}: {} poparc przy progu {}",
+            result.supporters,
+            result.threshold
+        );
+        assert!(result.endorsed);
+    }
+}
+
+#[test]
+fn adversary_equivocating_opener_is_evidence_not_a_split() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // The opener opens the round, then opens it again a second later under a
+    // fresh label. Nobody re-anchors. Every member keeps the second opening as
+    // evidence -- and since one disagreeing member is below the threshold, no
+    // member declares a split or leaves its slots. A lone liar changes nothing.
+    let fleet = 5;
+    let mut sea = Sea::new("equiv").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let ships = put_to_sea_with_adversary(
+        &mut sea,
+        fleet,
+        &hub,
+        &[],
+        0,
+        &["--adversary", "equivocate"],
+    );
+    let finals = await_all(&ships, Duration::from_mins(3));
+    let equivocated = count_in_log(&ships[0], "\"equivocated\"");
+    let evidence = ships[1..]
+        .iter()
+        .filter(|s| count_in_log(s, "\"evidence\"") >= 1)
+        .count();
+    let splits = ships
+        .iter()
+        .filter(|s| count_in_log(s, "\"split\"") >= 1)
+        .count();
+    note(&format!(
+        "  dwa wyzwalacze: {equivocated} drugie otwarcie, {evidence}/4 zachowalo dowod, {splits} oglosilo split, poparc {}",
+        finals[1].supporters
+    ));
+    note_anomalies(&ships);
+
+    assert_eq!(equivocated, 1);
+    assert!(evidence >= 3, "dowod musi zostac zachowany");
+    assert_eq!(
+        splits, 0,
+        "jeden klamca nie moze zdegradowac floty do losowania"
+    );
+    for (index, result) in finals.iter().enumerate() {
+        assert_eq!(result.supporters, 5, "statek {index} policzyl inaczej");
+        assert!(result.endorsed);
     }
 }

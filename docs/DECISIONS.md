@@ -716,3 +716,78 @@ The opening backoff is rank-ordered on each member's own clock, so under skew
 two members can open within one airtime and collide — bounded by the fault
 budget, handled by detection, not eliminated. Per-sender rate limits on
 accepted triggers. Radio hardware.
+
+---
+
+## D10 — Adversaries in containers, and what acknowledgement means under loss
+
+**Decided and measured 2026-09-19.** Everything before this was measured with
+honest members in bad conditions. The fault budget allows 40 % faulty members,
+and none had ever been put on the air. `lcq-node --adversary <mode>` makes one
+member misbehave in a chosen way; one container test per mode asserts that
+safety holds and records what liveness costs.
+
+### Six adversaries, one at a time
+
+| adversary | what it does | measured |
+|---|---|---|
+| forger | signs as another member, holds the group key | 12 refusals across the honest four; forger counts for nothing; 4 / 4 endorse |
+| double voter | ignores its journal, casts a second contradicting vote | every honest member refuses the second (`already cast`) exactly once; counted once; 5 / 5 |
+| acknowledgement liar | claims to have heard everyone, under 30 % loss | nobody endorses below threshold; 4 honest members stopped retrying after one attempt |
+| jammer | junk in the next member's binding slot every window, votes for nothing | 20 jams, 3 collisions; the three who could not hear the jammed member block at 3 / 4; **the jammed member endorses at 4 / 4** |
+| replayer | puts a captured frame back on the air during the vote | every replay dropped before a signature check; quorum unaffected |
+| equivocating opener | opens the round, then opens it again under a new label | 4 / 4 keep the second opening as evidence; **0 declare a split**; 5 / 5 |
+
+### Two findings that changed the design
+
+**A jammed member may hold a quorum the rest cannot see.** The first assertion
+written for the jam test was "nobody endorses". It was wrong. The jammed member
+cast its vote — it collided, but it exists, signed and journalled — and heard
+the other three: four genuine signatures, which *is* a quorum. Nobody
+fabricated anything. What jamming does is make the fleet **disagree about
+liveness**, never about safety: one member holds a verdict the others lack. The
+answer is store-and-forward, not a different tally. The test now asserts
+exactly that: nobody counts more than the four who actually voted, the three
+block, the one endorses.
+
+**"Somebody heard me" is the wrong stop rule under per-link loss.** The
+acknowledgement bit (D8) stops a sender once *anyone* reports hearing it. Loss
+is per link: a receiver that dropped that frame never gets it, and at 30 % loss
+each receiver was missing about one vote in four. The earlier passing runs were
+luck; measured five times, one in five failed. Stricter stop rules do not help,
+because acknowledgements ride only on frames and frames stop — the last member
+in slot order is never acknowledged by anyone's first frame, and a "stop once
+everyone acknowledged" rule chains into every member exhausting its attempts.
+
+The fix is the classic one for a broadcast channel: **receiver-driven repair**.
+After the scheduled attempts, a member still missing a vote from anyone who
+*spoke* in consultation sends, in its own slot, a frame saying what it holds —
+the same `heard` bitmap, under a new stage code. Any member absent from that
+list resends its committed vote once, from the outbox, in the next window.
+Three such rounds: request and resend are each a frame and each is lost as
+readily as the vote was, so one round left 20 % of runs short and three put it
+under 3 %. Measured five times after: five of five, four to eleven requests and
+two to five resends per run. The acknowledgement test is unchanged at eight
+attempts, since a clean channel has nothing to repair.
+
+### Three defects the adversaries exposed in the honest code
+
+* **Timing-based split detection fired on every honest retransmission.** It
+  assumed each frame was a first attempt, so a retry one window later implied
+  a foreign anchor, and any fleet with two retrying members declared a split
+  and left its slots. The drift is now taken modulo the window. Nothing is
+  lost: two anchors exactly a window apart put every slot on its own twin,
+  which collides with nobody. Every honest-fleet test now asserts no split.
+* **A member's own sequences were not in its replay window**, so a replay of
+  its own earlier frame reached the state machine before being refused.
+* **A replay aligned with the schedule is jamming.** A replayer repeating
+  every half window hit the same two slots every window and silenced them
+  through every retry. The replay test now drifts its period; the aligned case
+  is the jam test's.
+
+### What this does not cover
+
+Two adversaries at once, which the budget permits. An adversary that is also
+the majority of a partition. Evidence is still only kept locally. A compromised
+member can send a repair request with an empty list and cost every member one
+resend per round — bounded, and noted.

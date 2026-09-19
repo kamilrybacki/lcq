@@ -240,6 +240,13 @@ member may open, splits are detected at a threshold of two members and answered
 with randomised retries, late joiners derive the anchor. All measured in
 containers: skew, dead opener, isolated halves, 30 % loss, twelve vessels.
 
+### Adversaries and repair (D10)
+
+Six adversary modes on `lcq-node`, one container test each. Receiver-driven
+repair rounds after the scheduled vote, because per-link loss defeats a
+"somebody heard me" stop rule. Loss test measured five of five after; it was
+four of five before.
+
 ### What to pick up next
 
 1. **Equivocation on the trigger** (D6) — the one open blocker. Slots must

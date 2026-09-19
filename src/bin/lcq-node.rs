@@ -54,6 +54,25 @@ const CONTENT_HASH: [u8; 32] = [0x22; 32];
 /// the scale.
 const TRIGGER_STAGE: u8 = 0;
 
+/// Stage code for a repair request: "these are the binding votes I hold".
+///
+/// Carries no opinion and is never admitted to a case. An acknowledgement bit
+/// says *somebody* heard a member; under loss that is per link, and a sender
+/// that stops once anyone acknowledged it leaves whoever missed it without
+/// the vote for good. So after the scheduled window a member still short of
+/// votes says what it holds, and any member absent from that list resends its
+/// own vote once. Store-and-forward, driven by the receiver that has the gap.
+const NACK_STAGE: u8 = 4;
+
+/// Repair rounds after the scheduled binding attempts, two windows each: one
+/// for requests, one for the resends they ask for.
+///
+/// One round is not enough on a lossy channel: the request and the resend are
+/// each a frame, and each is lost as readily as the vote was. Measured at 30 %
+/// loss, a single round left one member in five short about one run in five.
+/// Three rounds put that below three per cent, for at most six more windows.
+const REPAIR_ROUNDS: u64 = 3;
+
 /// The subject's manifest identity, as every frame carries it.
 const MISSION_EPOCH: u16 = 1;
 const EVENT: u32 = 1;
@@ -71,6 +90,44 @@ fn same_subject(envelope: &CompactEnvelope, subject: &Subject) -> bool {
         && envelope.revision() == REVISION
         && envelope.content_hash() == subject.content_hash()
         && envelope.started_at() == subject.started_at().as_secs()
+}
+
+/// What a compromised member does. One member per run, for the tests that
+/// check safety holds and measure what liveness costs.
+///
+/// None of these modes can be reached by accident: they are how the test
+/// harness puts a faulty member on the air, so the honest members' defences
+/// are exercised by a real adversary rather than described in a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Adversary {
+    /// Honest.
+    None,
+    /// Signs every frame with another member's key while claiming its own index.
+    Forge,
+    /// Ignores its own journal and casts a second, contradicting binding vote.
+    DoubleVote,
+    /// Reports having heard everyone on every frame, whether it did or not.
+    LieAcks,
+    /// Transmits junk in the next member's slot every window, and votes for nothing.
+    Jam,
+    /// Records the first frame it hears and puts it back on the air during the vote.
+    Replay,
+    /// Opens the round, then opens it again a second later under a new label.
+    Equivocate,
+}
+
+impl Adversary {
+    fn parse(name: Option<&str>) -> Self {
+        match name {
+            Some("forge") => Self::Forge,
+            Some("double-vote") => Self::DoubleVote,
+            Some("lie-acks") => Self::LieAcks,
+            Some("jam") => Self::Jam,
+            Some("replay") => Self::Replay,
+            Some("equivocate") => Self::Equivocate,
+            _ => Self::None,
+        }
+    }
 }
 
 /// A random offset from the operating system's entropy, in `[0, bound)`.
@@ -134,6 +191,15 @@ fn main() {
     // acknowledgement costs eight bytes rather than a frame of its own.
     let mut heard = Heard::none();
     let mut acknowledged = false;
+    // Members heard at all, in any stage. A member that spoke in consultation
+    // and is absent from the binding tally is a gap worth asking about; one
+    // that never spoke may simply not be here.
+    let mut spoke: BTreeSet<usize> = BTreeSet::new();
+    // Repair rounds this node has already asked in, the resend it owes, and
+    // the round it last resent in -- one request and one resend per round.
+    let mut nacked_rounds: u64 = 0;
+    let mut repair_due: Option<Instant> = None;
+    let mut repaired_round: Option<u64> = None;
     // The round this node joined, and whether anybody turned out to be in a
     // different one. Signatures do not stop a member saying two things, so a
     // compromised opener can leave halves of a fleet counting slots from
@@ -161,6 +227,11 @@ fn main() {
     // offered again the moment consultation closes. Nothing about safety
     // changes, since the state machine checks it then exactly as it would have.
     let mut early: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    // Adversary bookkeeping. Unused by an honest member.
+    let mut equivocate_at: Option<Instant> = None;
+    let mut captured: Option<Vec<u8>> = None;
+    let mut jam_next: Option<Instant> = None;
+    let mut replay_next: Option<Instant> = None;
     // Highest sequence verified from each member. A frame at or below it is a
     // retransmission or a replay, and either way already known, so it is
     // dropped before paying for decryption and a signature check. Advanced only
@@ -185,7 +256,10 @@ fn main() {
     // The binding stage has to be long enough for every attempt it allows,
     // or the run ends before the retries it was configured for and the
     // measurement is of the window rather than of anything else.
-    let finish = starts[2] + stage_window * options.attempts.max(1) as u64 + 5;
+    // Two windows past the last binding attempt: one for repair requests, one
+    // for the resends they ask for.
+    let finish =
+        starts[2] + stage_window * (options.attempts.max(1) as u64 + 2 * REPAIR_ROUNDS) + 5;
     // The whole schedule -- every stage, every allowed attempt -- has to fit
     // before endorsement is expected. A binding stage that may legally begin
     // but cannot finish is not a schedule, and finding that out mid-round is
@@ -250,6 +324,13 @@ fn main() {
                     &clock,
                     "{\"event\":\"triggered\",\"by\":\"self\"}",
                 );
+                if options.adversary == Adversary::Equivocate {
+                    // Two seconds of wall time: after the consultation stages
+                    // and long before the vote, when the channel is idle. A
+                    // second opening that collides with somebody's opinion
+                    // tests the emulator, not the fleet.
+                    equivocate_at = Some(Instant::now() + Duration::from_secs(2));
+                }
             }
         }
         if began.is_none() {
@@ -314,6 +395,89 @@ fn main() {
             continue;
         }
         let anchor = began.expect("checked just above");
+        // The repair timeline, on the anchor's axis like everything else.
+        let window_wall = Duration::from_millis(clock.wall_ms(stage_window * 1_000));
+        let repair_start = anchor
+            + Duration::from_millis(
+                clock.wall_ms((starts[2] + stage_window * options.attempts.max(1) as u64) * 1_000),
+            );
+        let own_slot =
+            Duration::from_millis(clock.wall_ms(options.slot_ms() * options.index as u64));
+        // Which repair round the clock says we are in, if any.
+        let repair_round = || -> Option<u64> {
+            let since = Instant::now().checked_duration_since(repair_start)?;
+            let pair = window_wall.as_millis().saturating_mul(2).max(1);
+            let index = u64::try_from(since.as_millis() / pair).unwrap_or(u64::MAX);
+            (index < REPAIR_ROUNDS).then_some(index)
+        };
+
+        // A second opening of the same subject, validly signed, under a fresh
+        // label. Nobody who heard the first re-anchors; what it produces is
+        // evidence, and a single disagreeing member is below the threshold
+        // for declaring a split -- which is the point being tested.
+        if let Some(at) = equivocate_at
+            && Instant::now() >= at
+        {
+            equivocate_at = None;
+            let second = RoundId::new(
+                u16::try_from(options.index).unwrap_or(u16::MAX),
+                u32::try_from(journal.next_sequence()).unwrap_or(u32::MAX),
+            );
+            if let Ok(bytes) = build_trigger(
+                &subject,
+                &keys[options.index],
+                &group,
+                &mut journal,
+                &options,
+                second,
+            ) {
+                link.send(&bytes);
+                report(&options, &clock, "{\"event\":\"equivocated\"}");
+            }
+        }
+        // Junk in the next member's binding slot, every window. The junk opens
+        // under nobody's key, so it is refused everywhere; what it does is
+        // occupy the air where one member needs it.
+        if options.adversary == Adversary::Jam {
+            let target = (options.index + 1) % options.fleet;
+            let first = anchor
+                + Duration::from_millis(
+                    clock.wall_ms(starts[2] * 1_000 + options.slot_ms() * target as u64),
+                );
+            let next = jam_next.get_or_insert(first);
+            if Instant::now() >= *next {
+                let junk: Vec<u8> = (0..MAX_FRAME_BYTES - 8)
+                    .map(|i| {
+                        u8::try_from(entropy_below(256)).unwrap_or(0)
+                            ^ u8::try_from(i % 256).unwrap_or(0)
+                    })
+                    .collect();
+                link.send(&junk);
+                *next += Duration::from_millis(options.retry_gap_ms(&clock));
+                report(
+                    &options,
+                    &clock,
+                    &format!("{{\"event\":\"jammed\",\"slot_of\":{target}}}"),
+                );
+            }
+        }
+        // A frame heard earlier, put back on the air during the vote. Every
+        // receiver has already advanced past its sequence and drops it before
+        // paying for a signature check.
+        if options.adversary == Adversary::Replay
+            && let Some(old) = captured.as_ref()
+        {
+            let first = anchor + Duration::from_millis(clock.wall_ms(starts[2] * 1_000));
+            let next = replay_next.get_or_insert(first);
+            if Instant::now() >= *next {
+                link.send(old);
+                // Not half a window: that divides the schedule and lands on the
+                // same two slots every window, which is jamming, and the jam
+                // test covers jamming. This period drifts across the slots.
+                *next += Duration::from_millis(clock.wall_ms(options.stage_window_s() * 370));
+                report(&options, &clock, "{\"event\":\"replayed\"}");
+            }
+        }
 
         if !closed && clock.certainly_after(subject.consultation_cutoff()) {
             match case.close_consultation(&clock) {
@@ -348,6 +512,9 @@ fn main() {
         .into_iter()
         .enumerate()
         {
+            if options.adversary == Adversary::Jam {
+                break;
+            }
             // Only the binding vote is worth repeating, and only until somebody
             // reports having heard it. Repeating blind costs about four and a
             // half times the airtime for nothing (`DECISIONS.md` D4).
@@ -417,6 +584,13 @@ fn main() {
                 Ok(bytes) => {
                     link.send(&bytes);
                     attempts[index] += 1;
+                    // Our own sequence goes in the window as well. Without it a
+                    // replay of our own earlier frame passes the cheap check
+                    // and reaches the state machine, which refuses it -- but
+                    // only after paying for a signature verification.
+                    if let Ok((_, sequence)) = peek_frame_header(&bytes) {
+                        last_seen[options.index] = Some(sequence);
+                    }
                     // The next attempt returns to this member's own slot in the
                     // next window -- unless a split is known, in which case the
                     // schedule is what is colliding and the retry goes to a
@@ -475,13 +649,71 @@ fn main() {
             }
         }
 
+        // ---- repair rounds: ask for what is missing, resend what was asked ----
+        if closed
+            && options.adversary != Adversary::Jam
+            && let Some(round_index) = repair_round()
+            && nacked_rounds <= round_index
+            && Instant::now()
+                >= repair_start
+                    + window_wall * 2 * u32::try_from(round_index).unwrap_or(u32::MAX)
+                    + own_slot
+        {
+            nacked_rounds = round_index + 1;
+            let missing: Vec<usize> = spoke
+                .iter()
+                .copied()
+                .filter(|m| *m != options.index && !heard.contains(*m))
+                .collect();
+            if !missing.is_empty() {
+                match build_nack(
+                    &subject,
+                    &keys[options.index],
+                    &group,
+                    &mut journal,
+                    &options,
+                    heard,
+                    round,
+                ) {
+                    Ok(bytes) => {
+                        link.send(&bytes);
+                        let list: Vec<String> = missing.iter().map(ToString::to_string).collect();
+                        report(
+                            &options,
+                            &clock,
+                            &format!(
+                                "{{\"event\":\"nack\",\"round\":{round_index},\"missing\":[{}]}}",
+                                list.join(",")
+                            ),
+                        );
+                    }
+                    Err(why) => report(
+                        &options,
+                        &clock,
+                        &format!("{{\"event\":\"not_sent\",\"stage\":\"nack\",\"why\":\"{why}\"}}"),
+                    ),
+                }
+            }
+        }
+        if let Some(at) = repair_due
+            && Instant::now() >= at
+        {
+            repair_due = None;
+            if let Some(again) = journal.pending().next().map(|f| f.bytes().to_vec()) {
+                link.send(&again);
+                report(&options, &clock, "{\"event\":\"repaired\"}");
+            }
+        }
+
         // At most one frame per turn, and only after the send checks above have
         // had theirs. Verifying a signature is not free, and a node that misses
         // its own slot because it was busy reading is a node that collides with
         // whoever comes next.
-        if let Some(frame) = link.poll()
-            && !is_replay(&frame, &last_seen)
-        {
+        if let Some(frame) = link.poll() {
+            if is_replay(&frame, &last_seen) {
+                report(&options, &clock, "{\"event\":\"replay_dropped\"}");
+                continue;
+            }
             if let Some((other, opener, sequence)) =
                 trigger_round(&frame, &group, &manifest, &subject)
             {
@@ -494,6 +726,14 @@ fn main() {
                     // how many independent members disagree with us.
                     if evidence.len() < 4 {
                         evidence.push(frame.clone());
+                        report(
+                            &options,
+                            &clock,
+                            &format!(
+                                "{{\"event\":\"evidence\",\"opener\":{opener},\"kept\":{}}}",
+                                evidence.len()
+                            ),
+                        );
                     }
                     foreign.insert(opener);
                 }
@@ -503,12 +743,30 @@ fn main() {
             let learned = admit(
                 &frame, &subject, &manifest, &group, &mut case, &clock, &options,
             );
+            if options.adversary == Adversary::Replay && captured.is_none() {
+                captured = Some(frame.clone());
+            }
             if let Some((from, sequence)) = learned.verified {
                 last_seen[from] = Some(sequence);
+                spoke.insert(from);
                 if learned.refused == Some(TransitionError::WrongStageForPhase)
                     && learned.stage_index == Some(2)
                 {
                     early.insert(from, frame.clone());
+                }
+                // Somebody is short of our vote. Resend it once, in our own
+                // slot of the resend window, from the outbox -- the same bytes
+                // the journal committed, never a fresh decision.
+                if learned.nack
+                    && !learned.heard.contains(options.index)
+                    && repair_due.is_none()
+                    && journal.has_voted(&subject, &member_id(options.index))
+                    && let Some(round_index) = repair_round()
+                    && repaired_round != Some(round_index)
+                {
+                    repaired_round = Some(round_index);
+                    let resend_window = u32::try_from(2 * round_index + 1).unwrap_or(u32::MAX);
+                    repair_due = Some(repair_start + window_wall * resend_window + own_slot);
                 }
             }
             if let Some((from, _)) = learned.verified {
@@ -532,7 +790,20 @@ fn main() {
                             } else {
                                 anchor - at
                             };
-                            drift > Duration::from_millis(clock.wall_ms(options.slot_ms()))
+                            // Modulo the window. A retransmission arrives one
+                            // or more whole windows after the first attempt,
+                            // still in its own slot, so its drift is a multiple
+                            // of the window and must not read as a foreign
+                            // anchor -- the first version of this check made
+                            // every honest fleet with retries declare a split.
+                            // The reduction loses nothing: two anchors exactly
+                            // a window apart put every slot on top of its own
+                            // twin, which collides with nobody.
+                            let window = clock.wall_ms(options.stage_window_s() * 1_000).max(1);
+                            let drift_ms = u64::try_from(drift.as_millis()).unwrap_or(u64::MAX);
+                            let residue = drift_ms % window;
+                            let off = residue.min(window - residue);
+                            off > clock.wall_ms(options.slot_ms())
                         })
                     });
                 if by_label || by_timing {
@@ -612,13 +883,35 @@ fn build(
     round: RoundId,
 ) -> Result<Vec<u8>, String> {
     let voter = member_id(options.index);
-    if stage == Stage::BindingSupport && journal.has_voted(subject, &voter) {
+    let already = stage == Stage::BindingSupport && journal.has_voted(subject, &voter);
+    if already && options.adversary != Adversary::DoubleVote {
         return journal
             .pending()
             .next()
             .map(|frame| frame.bytes().to_vec())
             .ok_or_else(|| "already voted, nothing left in the outbox".to_string());
     }
+    // A double-voter holds a lock and builds a fresh, contradicting vote
+    // regardless. The lock is the honest member's discipline; what stops the
+    // second vote counting anywhere is every receiver's own state machine.
+    let verdict = if already { 2 } else { 1 };
+    let heard = if options.adversary == Adversary::LieAcks {
+        let mut everyone = Heard::none();
+        for member in 0..Heard::CAPACITY {
+            everyone.heard_from(member);
+        }
+        everyone
+    } else {
+        heard
+    };
+    // Holding the group key gets a frame decrypted; only the manifest key for
+    // the claimed index gets it believed. A forger has the first and not the
+    // second.
+    let signing = if options.adversary == Adversary::Forge {
+        &keys[(options.index + 1) % keys.len()]
+    } else {
+        &keys[options.index]
+    };
 
     let sequence = journal
         .reserve_sequence()
@@ -632,12 +925,12 @@ fn build(
         subject.started_at().as_secs(),
         author,
         stage_code(stage),
-        1,
+        verdict,
         sequence,
     )
     .acknowledging(heard)
     .in_round(round);
-    let signed = encode_compact(&envelope.sign(&keys[options.index])).map_err(|e| e.to_string())?;
+    let signed = encode_compact(&envelope.sign(signing)).map_err(|e| e.to_string())?;
     let sealed = seal_frame(group, author, sequence, &signed).map_err(|e| e.to_string())?;
     if sealed.len() > MAX_FRAME_BYTES {
         // The slot is sized to MAX_FRAME_BYTES. A wider frame would overrun
@@ -648,7 +941,7 @@ fn build(
         ));
     }
 
-    if stage == Stage::BindingSupport {
+    if stage == Stage::BindingSupport && !already {
         // Lock and outbox entry commit together, before the bytes leave here.
         journal
             .commit_vote(
@@ -659,6 +952,37 @@ fn build(
             .map_err(|error| error.to_string())?;
     }
     Ok(sealed)
+}
+
+/// A repair request: what this member holds, so others can see what it lacks.
+fn build_nack(
+    subject: &Subject,
+    key: &SigningKey,
+    group: &GroupKey,
+    journal: &mut LogJournal,
+    options: &Options,
+    heard: Heard,
+    round: RoundId,
+) -> Result<Vec<u8>, String> {
+    let sequence = journal
+        .reserve_sequence()
+        .map_err(|error| error.to_string())?;
+    let author = u16::try_from(options.index).unwrap_or(u16::MAX);
+    let envelope = CompactEnvelope::new(
+        MISSION_EPOCH,
+        EVENT,
+        REVISION,
+        *subject.content_hash(),
+        subject.started_at().as_secs(),
+        author,
+        NACK_STAGE,
+        0,
+        sequence,
+    )
+    .acknowledging(heard)
+    .in_round(round);
+    let signed = encode_compact(&envelope.sign(key)).map_err(|e| e.to_string())?;
+    seal_frame(group, author, sequence, &signed).map_err(|e| e.to_string())
 }
 
 /// The frame that opens a round: authenticated, carrying no opinion.
@@ -872,6 +1196,8 @@ fn admit(
         _ => None,
     };
     learned.acknowledges_us = received.envelope().heard().contains(options.index);
+    learned.heard = received.envelope().heard();
+    learned.nack = received.envelope().stage() == NACK_STAGE;
     let (Some(stage), Some(verdict)) = (
         stage_of(received.envelope().stage()),
         verdict_of(received.envelope().verdict()),
@@ -920,6 +1246,10 @@ struct Admitted {
     acknowledges_us: bool,
     /// Why the state machine refused the utterance, if it did.
     refused: Option<TransitionError>,
+    /// The frame was a repair request rather than an utterance.
+    nack: bool,
+    /// Who the sender reports holding binding votes from.
+    heard: Heard,
 }
 
 /// The socket to the channel emulator, with its reader on its own thread.
@@ -991,6 +1321,7 @@ struct Options {
     trigger_delay_ms: u64,
     attempts: usize,
     ignore_acks: bool,
+    adversary: Adversary,
 }
 
 impl Options {
@@ -1027,6 +1358,7 @@ impl Options {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1),
             ignore_acks: args.iter().any(|a| a == "--ignore-acks"),
+            adversary: Adversary::parse(value("--adversary").as_deref()),
         }
     }
 
