@@ -16,6 +16,10 @@
 mod bus;
 mod chip;
 mod executor;
+#[cfg(feature = "hardware")]
+mod hardware;
+#[cfg(feature = "hardware")]
+mod linux;
 mod radio;
 
 pub use bus::{HostDelay, SpiFault, VirtualIv, VirtualSpi};
@@ -24,4 +28,9 @@ pub use chip::{
     IRQ_HEADER_ERR, IRQ_RX_DONE, IRQ_TIMEOUT, IRQ_TX_DONE,
 };
 pub use executor::block_on;
-pub use radio::{StartError, Sx126xRadio};
+#[cfg(feature = "hardware")]
+pub use hardware::{HardwareError, HardwareRadio, LinuxWatch};
+#[cfg(feature = "hardware")]
+pub use linux::{LinuxIv, LinuxSpi, LinuxSpiError, Pins, SPI_SPEED_HZ};
+pub use lora_phy::sx126x::TcxoCtrlVoltage;
+pub use radio::{DriverHandle, StartError, Sx126xRadio, Watch};

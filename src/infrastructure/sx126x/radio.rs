@@ -8,18 +8,20 @@
 //! the real one is. The node sees none of this: it transmits and polls.
 
 use std::fmt;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
 use std::time::Duration;
 
+use embedded_hal_async::spi::SpiDevice;
 use lora_modulation::{Bandwidth, CodingRate, SpreadingFactor};
 use lora_phy::LoRa;
 use lora_phy::mod_params::{ModulationParams, PacketParams, RadioError as DriverError, RxMode};
-use lora_phy::mod_traits::IrqState;
+use lora_phy::mod_traits::{InterfaceVariant, IrqState};
 use lora_phy::sx126x::{Config, Sx126x, Sx1262};
 
 use super::bus::{HostDelay, VirtualIv, VirtualSpi};
-use super::chip::{Chip, IRQ_CRC_ERR, IRQ_HEADER_ERR};
+use super::chip::{Activity, Chip, IRQ_CRC_ERR, IRQ_HEADER_ERR};
 use super::executor::block_on;
 use crate::application::{PhyProfile, Radio, RadioError, RadioEvent, Received};
 use crate::infrastructure::hub::{HubError, HubSocket, Inbound};
@@ -53,15 +55,95 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-enum Command {
+/// What the driver thread waits on between commands, and what it may look at
+/// that the driver does not expose: the virtual chip's IRQ status, or nothing
+/// on a real board.
+pub trait Watch: Send + Sync {
+    /// Block until an IRQ is pending, the host asks for attention, or the
+    /// timeout passes.
+    fn wait_for_activity(&self, timeout: Duration) -> Activity;
+    /// Wake the driver thread: the host has a command.
+    fn wake_host(&self);
+    /// The chip's IRQ status right now, if it can be read without the driver:
+    /// the virtual chip's, never a real one's.
+    fn irq_flags(&self) -> Option<u16>;
+}
+
+impl Watch for Chip {
+    fn wait_for_activity(&self, timeout: Duration) -> Activity {
+        Chip::wait_for_activity(self, timeout)
+    }
+
+    fn wake_host(&self) {
+        Chip::wake_host(self);
+    }
+
+    fn irq_flags(&self) -> Option<u16> {
+        Some(self.snapshot().irq_status)
+    }
+}
+
+pub(crate) enum Command {
     Transmit(Vec<u8>),
+}
+
+/// The node's end of a driver thread: commands in, events out, whichever
+/// bus the driver is on.
+pub struct DriverHandle {
+    commands: Sender<Command>,
+    events: Receiver<RadioEvent>,
+    watch: Arc<dyn Watch>,
+}
+
+impl DriverHandle {
+    pub(crate) fn new(
+        commands: Sender<Command>,
+        events: Receiver<RadioEvent>,
+        watch: Arc<dyn Watch>,
+    ) -> Self {
+        Self {
+            commands,
+            events,
+            watch,
+        }
+    }
+
+    /// The watch the driver thread shares.
+    pub(crate) fn watch(&self) -> Arc<dyn Watch> {
+        Arc::clone(&self.watch)
+    }
+
+    /// Hand a frame to the driver thread and wake it.
+    ///
+    /// # Errors
+    ///
+    /// [`RadioError::TooLong`] past the chip's buffer, [`RadioError::Offline`]
+    /// once the driver thread is gone.
+    pub fn transmit(&self, bytes: &[u8]) -> Result<(), RadioError> {
+        if bytes.len() > MAX_PAYLOAD_BYTES {
+            return Err(RadioError::TooLong {
+                len: bytes.len(),
+                max: MAX_PAYLOAD_BYTES,
+            });
+        }
+        self.commands
+            .send(Command::Transmit(bytes.to_vec()))
+            .map_err(|_| RadioError::Offline)?;
+        self.watch.wake_host();
+        Ok(())
+    }
+
+    /// The next event from the driver thread, if any.
+    #[must_use]
+    pub fn poll(&self) -> Option<RadioEvent> {
+        self.events.try_recv().ok()
+    }
 }
 
 /// A virtual SX1262 attached to `lcq-hub`, driven by the unmodified
 /// `lora-phy` driver.
 pub struct Sx126xRadio {
-    commands: Sender<Command>,
-    events: Receiver<RadioEvent>,
+    handle: DriverHandle,
     chip: Chip,
 }
 
@@ -115,15 +197,25 @@ impl Sx126xRadio {
             .map_err(StartError::Thread)?;
 
         let (commands, inbox) = channel::<Command>();
-        let driven = chip.clone();
+        let kind = Sx126x::new(
+            VirtualSpi::new(chip.clone()),
+            VirtualIv::new(chip.clone()),
+            Config {
+                chip: Sx1262,
+                tcxo_ctrl: None,
+                use_dcdc: false,
+                rx_boost: false,
+            },
+        );
+        let watch: Arc<dyn Watch> = Arc::new(chip.clone());
+        let driven = Arc::clone(&watch);
         thread::Builder::new()
             .name(format!("sx126x-driver-{index}"))
-            .spawn(move || drive(&driven, profile, &inbox, &events_in))
+            .spawn(move || drive(driven.as_ref(), kind, profile, &inbox, &events_in))
             .map_err(StartError::Thread)?;
 
         Ok(Self {
-            commands,
-            events,
+            handle: DriverHandle::new(commands, events, watch),
             chip,
         })
     }
@@ -137,21 +229,11 @@ impl Sx126xRadio {
 
 impl Radio for Sx126xRadio {
     fn transmit(&mut self, bytes: &[u8]) -> Result<(), RadioError> {
-        if bytes.len() > MAX_PAYLOAD_BYTES {
-            return Err(RadioError::TooLong {
-                len: bytes.len(),
-                max: MAX_PAYLOAD_BYTES,
-            });
-        }
-        self.commands
-            .send(Command::Transmit(bytes.to_vec()))
-            .map_err(|_| RadioError::Offline)?;
-        self.chip.wake_host();
-        Ok(())
+        self.handle.transmit(bytes)
     }
 
     fn poll(&mut self) -> Option<RadioEvent> {
-        self.events.try_recv().ok()
+        self.handle.poll()
     }
 }
 
@@ -160,14 +242,19 @@ fn note(events: &Sender<RadioEvent>, body: String) {
 }
 
 /// The driver thread: bring the chip up, then listen, service IRQs and
-/// transmit on request until the node lets go of the radio.
-fn drive(
-    chip: &Chip,
+/// transmit on request until the node lets go of the radio. Generic over the
+/// bus: the virtual chip's or a real board's.
+pub(crate) fn drive<SPI, IV>(
+    watch: &dyn Watch,
+    kind: Sx126x<SPI, IV, Sx1262>,
     profile: PhyProfile,
     commands: &Receiver<Command>,
     events: &Sender<RadioEvent>,
-) {
-    let mut driver = match Driver::bring_up(chip, profile) {
+) where
+    SPI: SpiDevice<u8>,
+    IV: InterfaceVariant,
+{
+    let mut driver = match Driver::bring_up(kind, profile) {
         Ok(driver) => driver,
         Err(why) => {
             note(
@@ -180,19 +267,15 @@ fn drive(
     note(
         events,
         format!(
-            "\"event\":\"chip_up\",\"phy\":\"{}\",\"sf\":{},\"bw_hz\":{},\"frequency_hz\":{},\"scale\":{}",
-            profile.name,
-            profile.spreading_factor,
-            profile.bandwidth_hz,
-            profile.frequency_hz,
-            chip.scale()
+            "\"event\":\"chip_up\",\"phy\":\"{}\",\"sf\":{},\"bw_hz\":{},\"frequency_hz\":{}",
+            profile.name, profile.spreading_factor, profile.bandwidth_hz, profile.frequency_hz
         ),
     );
     let mut buffer = [0u8; MAX_PAYLOAD_BYTES];
     loop {
-        let activity = chip.wait_for_activity(IDLE_WAIT);
+        let activity = watch.wait_for_activity(IDLE_WAIT);
         if activity.irq {
-            driver.service_irq(chip, &mut buffer, events);
+            driver.service_irq(watch, &mut buffer, events);
         }
         loop {
             match commands.try_recv() {
@@ -218,8 +301,12 @@ fn drive(
 }
 
 /// The driver and the parameters it was brought up with.
-struct Driver {
-    lora: LoRa<Sx126x<VirtualSpi, VirtualIv, Sx1262>, HostDelay>,
+struct Driver<SPI, IV>
+where
+    SPI: SpiDevice<u8>,
+    IV: InterfaceVariant,
+{
+    lora: LoRa<Sx126x<SPI, IV, Sx1262>, HostDelay>,
     modulation: ModulationParams,
     tx_params: PacketParams,
     rx_params: PacketParams,
@@ -227,24 +314,18 @@ struct Driver {
     rx_continuous: bool,
 }
 
-impl Driver {
-    fn bring_up(chip: &Chip, profile: PhyProfile) -> Result<Self, String> {
+impl<SPI, IV> Driver<SPI, IV>
+where
+    SPI: SpiDevice<u8>,
+    IV: InterfaceVariant,
+{
+    fn bring_up(kind: Sx126x<SPI, IV, Sx1262>, profile: PhyProfile) -> Result<Self, String> {
         let sf = spreading_factor(profile.spreading_factor)
             .ok_or_else(|| format!("spreading factor {}", profile.spreading_factor))?;
         let bw = bandwidth(profile.bandwidth_hz)
             .ok_or_else(|| format!("bandwidth {} Hz", profile.bandwidth_hz))?;
         let cr = coding_rate(profile.coding_rate_denominator)
             .ok_or_else(|| format!("coding rate 4/{}", profile.coding_rate_denominator))?;
-        let kind = Sx126x::new(
-            VirtualSpi::new(chip.clone()),
-            VirtualIv::new(chip.clone()),
-            Config {
-                chip: Sx1262,
-                tcxo_ctrl: None,
-                use_dcdc: false,
-                rx_boost: false,
-            },
-        );
         let mut lora = block_on(LoRa::with_syncword(kind, profile.sync_word, HostDelay))
             .map_err(|error| format!("init: {error:?}"))?;
         let modulation = lora
@@ -316,7 +397,7 @@ impl Driver {
     }
 
     /// Something reached DIO1 while listening.
-    fn service_irq(&mut self, chip: &Chip, buffer: &mut [u8], events: &Sender<RadioEvent>) {
+    fn service_irq(&mut self, watch: &dyn Watch, buffer: &mut [u8], events: &Sender<RadioEvent>) {
         match block_on(self.lora.process_irq_event()) {
             Ok(Some(IrqState::Done)) => {
                 // The driver does not say whether the frame passed its CRC --
@@ -324,7 +405,9 @@ impl Driver {
                 // the IRQ status nothing has cleared yet; a real adapter would
                 // read `GetIrqStatus` for the same answer. A failed frame is
                 // telemetry, never a frame: nothing above this decodes it.
-                let corrupted = chip.snapshot().irq_status & IRQ_CRC_ERR != 0;
+                let corrupted = watch
+                    .irq_flags()
+                    .is_some_and(|flags| flags & IRQ_CRC_ERR != 0);
                 match block_on(self.lora.get_rx_result(&self.rx_params, buffer)) {
                     Ok((_, status)) if corrupted => {
                         let _ = events.send(RadioEvent::CrcError {
@@ -352,7 +435,10 @@ impl Driver {
             Ok(Some(IrqState::PreambleReceived) | None) => {
                 // The driver says nothing about a header error; the chip's
                 // IRQ status does, and the packet status carries its strength.
-                if chip.snapshot().irq_status & IRQ_HEADER_ERR != 0 {
+                if watch
+                    .irq_flags()
+                    .is_some_and(|flags| flags & IRQ_HEADER_ERR != 0)
+                {
                     let rssi_dbm = block_on(self.lora.get_rx_result(&self.rx_params, buffer))
                         .map_or(0, |(_, status)| status.rssi);
                     let _ = events.send(RadioEvent::HeaderError { rssi_dbm });

@@ -88,6 +88,23 @@ The container suite (`tests/containers.rs`) does all of this in Docker, one
 container per vessel, and `LCQ_RADIO=sx1262` runs the whole suite on the
 virtual chips.
 
+## Running on hardware
+
+Two ways onto a real SX1262, behind the same seam (D21), neither yet tried on
+a board:
+
+```sh
+# An RNode (Heltec, LilyGO, RAK boards with RNode firmware) on USB serial:
+lcq-node --index 1 --fleet 5 --slots --journal ship1.log --radio rnode:/dev/ttyACM0
+# An SX1262 HAT on a Raspberry Pi: spidev, then the gpiochip and the BUSY,
+# DIO1 and NRESET line offsets, and the TCXO voltage if the module has one:
+lcq-node --index 1 --fleet 5 --slots --journal ship1.log \
+  --radio spi:/dev/spidev0.0,/dev/gpiochip0,busy=24,dio1=16,reset=18,tcxo=1.8
+```
+
+Both live behind the `hardware` cargo feature, on by default. Members on
+hardware need no hub: the air is the medium.
+
 ## Development
 
 ```sh

@@ -7,6 +7,7 @@ mod hub_radio;
 pub(crate) mod lock_key;
 mod log;
 mod memory;
+pub mod rnode;
 pub mod sx126x;
 
 pub use clock::{ScaledClock, SystemClock};

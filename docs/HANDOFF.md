@@ -339,13 +339,25 @@ off-slot frames as two foreign anchors. The check now runs only while the
 schedule is running; repair rounds are where frames are expected off their
 author's slot. Gate on both radios: hub 20 of 20 in 745 s, virtual SX1262 20 of 20 in 631 s.
 
+### Two ways onto hardware (D21)
+
+`--radio rnode:<port>` drives an RNode -- any board with RNode firmware -- over
+its KISS host protocol, implemented sans I/O in `infrastructure::rnode` and
+pinned against a fake RNode on a pseudo-terminal pair (`tests/rnode.rs`).
+`--radio spi:<spidev>,<gpiochip>,busy=,dio1=,reset=[,tcxo=]` runs the same
+`lora-phy` driver thread as the virtual chip on `spidev` and the GPIO
+character device, with the air for a medium; the driver thread is generic
+over the bus (`Watch`, `DriverHandle`), so only the bus changed. Neither has
+met a board. What the first board has to answer is in the pick-up list.
+
 ### What to pick up next
 
-1. **Hardware qualification** (roadmap M8): the virtual module passes the
-   whole suite (D16), so the next radio is a real one. Two SX1262 boards first
-   — RNode firmware over USB needs no firmware work, and `tulle` already
-   speaks its KISS protocol in Rust — then five. Same node binary; for an SPI
-   HAT only `VirtualSpi`/`VirtualIv` are swapped for `linux-embedded-hal`.
+1. **Hardware qualification** (roadmap M8): both adapters exist (D21) and
+   have never seen a board. Two SX1262 boards first -- RNode firmware over USB
+   needs no firmware work -- then five. First measurements, wired through
+   attenuators: bring-up on both adapters, `SetTx` to `TxDone`, `SetRx` to the
+   first catchable preamble, the late-listener and capture thresholds the
+   model guesses at, CAD latency, sleep/wake.
 2. **Chip model fidelity**, from Hermes's review of D16 (Discord, 2026-09-19
    15:35 UTC) and D16's own list. Ready for a first hardware pass of the
    driver and state machine; not ready for claims about capture or collision
@@ -378,8 +390,10 @@ author's slot. Gate on both radios: hub 20 of 20 in 745 s, virtual SX1262 20 of 
    needs a product decision before it is built.
 7. Hub fidelity: port LoRaSim's preamble-relative capture rule; calibrate
    `sensitivity_dbm_at` and `capture_wins` with `gr-lora_sdr` tables (D16).
-8. The replay page (artifact) shows D9-era numbers; regenerate the trace once
-   the radio seam has landed.
+8. The replay page (https://claude.ai/artifact/7ArnQomVMHiArWiZyUzfWp, version 8)
+   now shows the D20 frame: 122 bytes on the air, a slot sized to 152.
+   `examples/trace.rs` measures both from the wire format instead of carrying
+   constants; `cargo run --example trace` regenerates the page's data.
 9. Upstream: https://github.com/lora-rs/lora-rs/pull/487 makes `lora-phy`'s
    `rx()` return `RadioError::CrcError` / `HeaderError` instead of handing
    corrupted bytes up. Once it is merged and the git dependency moves past it,

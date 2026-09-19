@@ -33,7 +33,8 @@ use lcq::domain::contracts::{
 use lcq::domain::quorum::{Policy, evaluate};
 use lcq::domain::state::{Case, TransitionError};
 use lcq::domain::time::{Clock, Timestamp};
-use lcq::infrastructure::sx126x::Sx126xRadio;
+use lcq::infrastructure::rnode::RNodeRadio;
+use lcq::infrastructure::sx126x::{HardwareRadio, Pins, Sx126xRadio, TcxoCtrlVoltage};
 use lcq::infrastructure::{HubRadio, LogJournal, ScaledClock};
 use lcq::sim::airtime_ms;
 use lcq::wire::{
@@ -1522,27 +1523,84 @@ fn transmit(
     false
 }
 
-/// Which adapter carries this node's frames (D16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which adapter carries this node's frames (D16, D21).
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RadioChoice {
     /// The emulator's socket, as before D16.
     Hub,
     /// A virtual SX1262 under the real driver, attached to the emulator.
     Sx1262,
+    /// An `RNode` on a serial port: `rnode:/dev/ttyACM0`.
+    RNode(String),
+    /// An SX1262 on SPI and GPIO:
+    /// `spi:/dev/spidev0.0,/dev/gpiochip0,busy=24,dio1=16,reset=18[,tcxo=1.8]`.
+    Spi {
+        device: String,
+        gpiochip: String,
+        busy: u32,
+        dio1: u32,
+        reset: u32,
+        tcxo_millivolts: Option<u32>,
+    },
 }
 
 impl RadioChoice {
     fn parse(value: Option<&str>) -> Self {
         match value {
             Some("sx1262") => Self::Sx1262,
+            Some(spec) if spec.starts_with("rnode:") => {
+                Self::RNode(spec["rnode:".len()..].to_string())
+            }
+            Some(spec) if spec.starts_with("spi:") => Self::parse_spi(&spec["spi:".len()..]),
             _ => Self::Hub,
         }
     }
 
-    const fn name(self) -> &'static str {
+    /// `device,gpiochip,busy=N,dio1=N,reset=N[,tcxo=V]`; a spec that does not
+    /// parse is refused loudly rather than guessed at.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn parse_spi(spec: &str) -> Self {
+        let mut parts = spec.split(',');
+        let device = parts.next().unwrap_or_default().to_string();
+        let gpiochip = parts.next().unwrap_or_default().to_string();
+        let (mut busy, mut dio1, mut reset, mut tcxo_millivolts) = (None, None, None, None);
+        for part in parts {
+            match part.split_once('=') {
+                Some(("busy", n)) => busy = n.parse().ok(),
+                Some(("dio1", n)) => dio1 = n.parse().ok(),
+                Some(("reset", n)) => reset = n.parse().ok(),
+                Some(("tcxo", v)) => {
+                    tcxo_millivolts = v
+                        .parse::<f64>()
+                        .ok()
+                        .map(|volts| (volts.clamp(0.0, 5.0) * 1_000.0).round() as u32);
+                }
+                _ => {}
+            }
+        }
+        match (busy, dio1, reset) {
+            (Some(busy), Some(dio1), Some(reset)) if !device.is_empty() && !gpiochip.is_empty() => {
+                Self::Spi {
+                    device,
+                    gpiochip,
+                    busy,
+                    dio1,
+                    reset,
+                    tcxo_millivolts,
+                }
+            }
+            _ => panic!(
+                "--radio spi: expected device,gpiochip,busy=N,dio1=N,reset=N[,tcxo=V], got {spec:?}"
+            ),
+        }
+    }
+
+    fn name(&self) -> &'static str {
         match self {
             Self::Hub => "hub",
             Self::Sx1262 => "sx1262",
+            Self::RNode(_) => "rnode",
+            Self::Spi { .. } => "spi",
         }
     }
 }
@@ -1552,7 +1610,7 @@ impl RadioChoice {
 /// A node may well be powered up before whatever carries its traffic is
 /// reachable; both adapters retry for thirty seconds before this gives up.
 fn open_radio(options: &Options) -> Box<dyn Radio> {
-    match options.radio {
+    match &options.radio {
         RadioChoice::Hub => Box::new(
             HubRadio::connect(&options.hub, options.index).expect("hub never became reachable"),
         ),
@@ -1565,6 +1623,37 @@ fn open_radio(options: &Options) -> Box<dyn Radio> {
             )
             .expect("virtual radio never came up"),
         ),
+        RadioChoice::RNode(port) => Box::new(
+            RNodeRadio::open_path(port, PhyProfile::eu868_sf10())
+                .unwrap_or_else(|error| panic!("RNode on {port}: {error}")),
+        ),
+        RadioChoice::Spi {
+            device,
+            gpiochip,
+            busy,
+            dio1,
+            reset,
+            tcxo_millivolts,
+        } => {
+            let pins = Pins {
+                chip: gpiochip.clone(),
+                busy: *busy,
+                dio1: *dio1,
+                reset: *reset,
+            };
+            let tcxo = tcxo_millivolts.map(|millivolts| match millivolts {
+                ..1_700 => TcxoCtrlVoltage::Ctrl1V6,
+                1_700..1_900 => TcxoCtrlVoltage::Ctrl1V8,
+                1_900..2_500 => TcxoCtrlVoltage::Ctrl2V2,
+                2_500..2_900 => TcxoCtrlVoltage::Ctrl2V7,
+                2_900..3_200 => TcxoCtrlVoltage::Ctrl3V0,
+                _ => TcxoCtrlVoltage::Ctrl3V3,
+            });
+            Box::new(
+                HardwareRadio::open(device, &pins, tcxo, PhyProfile::eu868_sf10())
+                    .unwrap_or_else(|error| panic!("SX1262 on {device}: {error}")),
+            )
+        }
     }
 }
 

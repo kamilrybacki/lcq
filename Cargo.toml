@@ -16,6 +16,9 @@ lora-phy = { git = "https://github.com/lora-rs/lora-rs", version = "3.0.2-alpha"
 lora-modulation = { git = "https://github.com/lora-rs/lora-rs", version = "0.1.5" }
 embedded-hal = "1"
 embedded-hal-async = "1"
+serial2 = { version = "0.2", optional = true, features = ["unix"] }
+spidev = { version = "0.6", optional = true }
+gpio-cdev = { version = "0.6", optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -27,3 +30,8 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+
+[features]
+default = ["hardware"]
+# Real radios: an RNode on a serial port, an SX1262 on spidev and GPIO.
+hardware = ["dep:serial2", "dep:spidev", "dep:gpio-cdev"]

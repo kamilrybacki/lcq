@@ -1223,3 +1223,32 @@ Rules out: carrying the hash on the wire again, and any receiver that counts a
 frame without a case of its own to verify it against. Revisit if a fleet ever
 deliberates several cases at once with references that collide -- eight bytes
 make that a design fault, not a chance.
+
+---
+
+## D21 — Two ways onto real hardware, behind the same seam
+
+**Decided and implemented 2026-09-19**, untested against boards until there
+are boards (roadmap M8).
+
+- **RNode over a serial port** (`--radio rnode:/dev/ttyACM0`): the host
+  protocol of RNode firmware -- KISS frames, a command byte at the head,
+  configuration echoed as confirmation, `RADIO_STATE` echoed as `1` once the
+  radio is on, an RSSI/SNR/data triplet per received packet -- implemented
+  sans I/O in `infrastructure::rnode::RNodeLink` and pinned by tests against
+  a fake RNode on a pseudo-terminal pair. Nothing to flash but a released
+  firmware; the cheapest first contact with the air.
+- **An SX1262 on SPI and GPIO** (`--radio spi:/dev/spidev0.0,/dev/gpiochip0,busy=24,dio1=16,reset=18,tcxo=1.8`):
+  the same `lora-phy` driver thread as the virtual chip, with `spidev` and
+  the GPIO character device for a bus (`infrastructure::sx126x::linux`) and
+  the air for a medium (`sx126x::hardware`). The driver thread is generic
+  over the bus (`Watch`, `DriverHandle`); only the bus is swapped, as D16
+  promised. Without the virtual chip's view of the IRQ status a CRC-failed
+  frame reaches the node as a reception and the seal rejects it; the
+  upstream change that surfaces CRC and header errors closes that.
+
+Both live behind the `hardware` cargo feature (default on); the container
+suite builds them into the static binaries and never exercises them. What
+would justify revisiting: the first board. Every timing in the Linux bus --
+BUSY timeout, DIO1 polling, reset pulse -- is a datasheet figure or a guess,
+and Hermes's measurement matrix (handoff) is where they get replaced.

@@ -9,16 +9,32 @@
 use lcq::domain::contracts::CONSULTATION_CUTOFF_SECONDS;
 use lcq::domain::time::MAX_CLOCK_SKEW_SECONDS;
 use lcq::sim::{
-    ANTENNA_GAIN_DBI, DUTY_CYCLE_BUDGET_MS, Deliberation, Outcome, SENSITIVITY_DBM, Scenario,
-    TX_POWER_DBM, Topology, TraceEntry, airtime_ms_at, breakpoint_m, max_range_m, path_loss_db,
-    radio_horizon_m, sensitivity_dbm_at,
+    ANTENNA_GAIN_DBI, DEFAULT_SPREADING_FACTOR, DUTY_CYCLE_BUDGET_MS, Deliberation, Outcome,
+    SENSITIVITY_DBM, Scenario, TX_POWER_DBM, Topology, TraceEntry, airtime_ms_at, breakpoint_m,
+    max_range_m, path_loss_db, radio_horizon_m, sensitivity_dbm_at,
+};
+use lcq::wire::{
+    CompactEnvelope, GroupKey, Heard, MAX_FRAME_BYTES, RoundId, SigningKey, encode_compact,
+    seal_frame,
 };
 
-/// A signed, compacted endorsement frame.
-const FRAME_BYTES: usize = 105;
-
-/// Time on air for one such frame at the default spreading factor.
-const FRAME_AIRTIME_MS: u64 = 1067;
+/// A signed, sealed endorsement frame as the node puts it on the air: every
+/// field at a realistic value, the acknowledgement bitmap and round label set.
+/// Measured, not assumed, so the page follows the wire format (D20).
+fn frame_bytes() -> usize {
+    let mut heard = Heard::none();
+    for member in 0..5 {
+        heard.heard_from(member);
+    }
+    let envelope = CompactEnvelope::new(1, 1, 0, [0x11; 32], 1_700_000_000, 3, 3, 1, 4_242)
+        .acknowledging(heard)
+        .in_round(RoundId::new(0, 1));
+    let signed = encode_compact(&envelope.sign(&SigningKey::from_seed([7; 32]), &[0x11; 32]))
+        .expect("encodes");
+    seal_frame(&GroupKey::from_bytes([9; 32]), 3, 4_242, &signed)
+        .expect("seals")
+        .len()
+}
 
 /// Loss per doubling of distance in the two-ray far field over water.
 const DB_PER_DOUBLING: f64 = 12.04;
@@ -127,7 +143,8 @@ fn print_radio() {
         "  \"eirpDbm\": {:.0},",
         TX_POWER_DBM + 2.0 * ANTENNA_GAIN_DBI
     );
-    println!("  \"frameBytes\": {FRAME_BYTES},");
+    println!("  \"frameBytes\": {},", frame_bytes());
+    println!("  \"maxFrameBytes\": {MAX_FRAME_BYTES},");
 }
 
 fn print_path_loss() {
@@ -154,7 +171,7 @@ fn print_spreading() {
     print!("  \"spreading\": [");
     let reference = sensitivity_dbm_at(10);
     for sf in 7..=12u8 {
-        let air = airtime_ms_at(sf, FRAME_BYTES);
+        let air = airtime_ms_at(sf, frame_bytes());
         let reach = 2f64.powf((reference - sensitivity_dbm_at(sf)) / DB_PER_DOUBLING);
         if sf > 7 {
             print!(", ");
@@ -195,7 +212,11 @@ fn print_scenarios(cases: &[(&str, Scenario)]) {
         println!("    {{");
         println!("      \"name\": \"{name}\",");
         println!("      \"access\": \"{access}\",");
-        println!("      \"slotMs\": {},", FRAME_AIRTIME_MS + GUARD_MS);
+        // The node sizes its slot to the widest frame, not the typical one.
+        println!(
+            "      \"slotMs\": {},",
+            airtime_ms_at(DEFAULT_SPREADING_FACTOR, MAX_FRAME_BYTES) + GUARD_MS
+        );
         println!("      \"fleet\": {},", scenario.fleet());
         match scenario.spacing_m() {
             // Null is not "zero metres apart": it means distance is not
