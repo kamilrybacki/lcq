@@ -270,15 +270,27 @@ unchanged, in its own slot. Geometry test tally went from [4, 5, 5, 5, 4] to
 
 ### What to pick up next
 
-1. **Equivocation on the trigger** (D6) — the one open blocker. Slots must
-   anchor on the trigger, so this cannot be dodged. Recommended treatment is
-   written down: round identity from the trigger hash, hearing two as evidence,
-   fall back to random contention on detection.
-2. **Acknowledgement on the air** (D4) — worth roughly 4.5x the airtime. Nothing
-   carries the fact today; `Journal::acknowledge` exists but no frame says it.
+1. **Radio seam and virtual SX1262** (D16, `RESEARCH-lora-module-emulation.md`)
+   — in progress. The node's hub socket becomes one adapter behind a `Radio`
+   seam; a timed SX126x chip model under the unmodified `lora-phy` driver is
+   the second; the container suite has to pass on both. The hub → node frame
+   grows RSSI/SNR/airtime metadata, and collided frames arrive as CRC errors.
+2. **Hardware qualification** (roadmap M8) once the virtual module passes: two
+   SX1262 boards first — RNode firmware over USB needs no firmware work — then
+   five. Same node binary; only the SPI/GPIO adapter changes.
 3. **Short case reference** (D4) — 23 % off every frame, no security traded.
-4. `RadioQueue` is now what the node carries other members' votes with, on
-   request (D15). The distress class exists and nothing yet uses it; the first
+4. `RadioQueue` is what the node carries other members' votes with, on request
+   (D15). The distress class exists and nothing yet uses it; the first
    application traffic that is genuinely urgent should.
 5. From review: per-sender replay windows with retention limits, cheap rejection
    of senders outside the manifest.
+6. Evidence of misbehaviour is held locally (four frames) and reported in the
+   log; there is no exclusion procedure. That is governance, not protocol, and
+   needs a product decision before it is built.
+7. Hub fidelity: port LoRaSim's preamble-relative capture rule; calibrate
+   `sensitivity_dbm_at` and `capture_wins` with `gr-lora_sdr` tables (D16).
+8. The replay page (artifact) shows D9-era numbers; regenerate the trace once
+   the radio seam has landed.
+
+Equivocation on the trigger (D6, D10) and acknowledgement on the air (D8) used
+to head this list; both are built and measured in containers.

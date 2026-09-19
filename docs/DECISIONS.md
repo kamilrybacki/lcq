@@ -1000,3 +1000,67 @@ exactly where a request shows it is needed and nowhere else. And a compromised
 member can request repairs it does not need and cost each holder one carried
 frame per round: bounded, and the same class of cost as an empty-list request
 (D10).
+
+---
+
+## D16 — One radio seam; the first radio after the hub is a virtual SX1262 under the unmodified `lora-phy` driver
+
+**Decided 2026-09-19**, on the research in `RESEARCH-lora-module-emulation.md`
+(own sources plus Hermes's consultation, which reached the same ranking).
+
+The question was whether the node can be made to talk to a *virtual LoRa
+module* the way it talks to a real one, so that the binary the container suite
+exercises is the binary that goes to sea. It can, and nobody ships it: the
+closest existing pieces are Meshtastic's `SimRadio` (a loopback to a TCP medium,
+the shape `lcq-hub` already has) and a clockless test emulator of the SX126x
+command set inside `lora-rs/lora-rs`.
+
+### What was decided
+
+1. **The node talks to a radio through one small seam** — construct with a PHY
+   profile, `transmit(bytes)`, `poll()` for received frames with RSSI/SNR and
+   for CRC failures. Today's hub socket (`Link`) becomes the first adapter. The
+   protocol, the journal and the schedule do not learn which adapter is behind
+   it. The 27 methods of a chip driver's `RadioKind` stay behind the seam.
+2. **Module emulation means a timed behavioural model of the SX126x LoRa
+   command subset**, driven by the *unmodified* `lora-phy` `Sx126x` driver
+   through a virtual SPI device and virtual BUSY/DIO1/reset lines, attached to
+   `lcq-hub` as its medium. The model owns a clock: TX occupies the airtime the
+   modulation and packet parameters imply and raises `TxDone` at its end; the
+   chip is deaf outside RX; RX timeouts run; a frame is received only if the
+   chip was in RX for its whole duration; packet status carries the medium's
+   RSSI/SNR; a collided frame arrives as a CRC error. Register-for-register
+   fidelity is *not* the goal — behaviour the datasheet specifies and the hub
+   can time is.
+3. **Hardware is the gate, not another emulator**: two SX1262 boards first,
+   five later (roadmap M8) — RNode firmware over USB for a zero-firmware start,
+   an SPI HAT on a Linux SBC for the deployment shape. Only the virtual SPI and
+   GPIO are swapped for `linux-embedded-hal`; driver, seam and protocol stay.
+4. **`gr-lora_sdr` is a calibration lab only** — a separate GPL process that
+   produces FER-vs-SNR and capture-vs-(power, offset) tables for the hub and the
+   chip model. Never in CI, never linked into the crate.
+
+### What it rules out
+
+- Renode, QEMU and Wokwi as the emulation vehicle: none has a Semtech LoRa
+  model (code search across `renode/renode-infrastructure` and `qemu/qemu`:
+  zero hits), and each would demand the same modem state machine again, plus an
+  MCU we do not target.
+- ns-3 `lorawan`, ELoRa, FLoRa and LoRaSim as a runtime the node attaches to:
+  they are LoRaWAN-shaped and cannot run the node binary. They remain useful
+  as independent models to compare the hub's rules against, and LoRaSim's
+  preamble-relative capture rule is worth porting into the hub.
+- A LoRa driver of our own for the virtual chip or the hardware. `lora-phy`
+  checks its SPI stream against Semtech's reference driver; a rewrite would
+  discard that.
+- Exposing the driver API to the protocol, or letting the protocol block on
+  the driver: the radio runs on its own thread behind the seam.
+
+### What would justify revisiting
+
+- LCQ becoming `no_std` firmware on an MCU — then Renode earns its keep for
+  reset/GPIO/SPI/IRQ paths and the seam moves down a layer.
+- `lora-phy` stalling (last upstream push 2026-08-27) — the fallback is
+  `radio-sx126x`-style blocking drivers behind the *same* seam, not a new seam.
+- A chosen module outside the SX126x/SX127x families (LR11xx, SX128x): the
+  chip model is per family; the seam is not.
