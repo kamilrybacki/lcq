@@ -784,6 +784,17 @@ fn a_larger_fleet_costs_no_more_time_than_a_small_one() {
         finals[0].threshold,
         took.as_secs_f64()
     ));
+    note(&format!("  {} zderzen w emulatorze", Sea::collisions(&hub)));
+    note_anomalies(&ships);
+    let short: Vec<String> = finals
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.supporters < fleet)
+        .map(|(i, f)| format!("{i}:{}", f.supporters))
+        .collect();
+    if !short.is_empty() {
+        note(&format!("  niepelne tally: {short:?}"));
+    }
 
     for (index, result) in finals.iter().enumerate() {
         assert_eq!(result.supporters, fleet, "statek {index} policzyl inaczej");
@@ -1511,5 +1522,116 @@ fn a_vessel_killed_inside_the_round_finishes_it_after_refloating() {
     for result in &others {
         assert!(result.endorsed);
         assert!(result.supporters >= result.threshold);
+    }
+}
+
+#[test]
+fn a_vessel_out_of_airtime_transmits_nothing_and_the_fleet_carries_on() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // Thirty-five of its thirty-six seconds already spent on other traffic
+    // before the round: not one endorsement frame fits. The node must refuse
+    // every transmission rather than key up unlawfully -- and log each
+    // refusal -- while the other four still reach the threshold without it.
+    let fleet = 5;
+    let mut sea = Sea::new("duty").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let ships = put_to_sea_with_adversary(
+        &mut sea,
+        fleet,
+        &hub,
+        &[],
+        4,
+        &["--prior-airtime-ms", "35000"],
+    );
+    let finals = await_all(&ships, Duration::from_mins(3));
+    let blocked = count_in_log(&ships[4], "\"duty_blocked\"");
+    let sent = count_in_log(&ships[4], "\"event\":\"sent\"");
+    note(&format!(
+        "  bez budzetu anteny: {blocked} odmow, {sent} wyslanych; reszta poparc {} / prog {}",
+        finals[0].supporters, finals[0].threshold
+    ));
+    note_anomalies(&ships);
+
+    assert!(blocked >= 3, "kazdy etap musi zostac odmowiony");
+    assert_eq!(sent, 0, "bez budzetu nic nie wychodzi na antene");
+    for (index, result) in finals.iter().enumerate().take(4) {
+        assert_eq!(result.supporters, 4, "statek {index} policzyl inaczej");
+        assert!(result.endorsed);
+    }
+}
+
+#[test]
+fn adversaries_two_of_five_is_the_whole_fault_budget_and_safety_still_holds() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // Two faulty members of five is exactly the fault budget (floor of 40 %),
+    // which is why the count threshold is four: any four members must include
+    // at least two honest ones... and any quorum must survive two members
+    // doing their worst. Here one forges and one double-votes. The forger
+    // contributes nothing. The double voter's FIRST vote is a genuine, valid
+    // vote -- the budget is about members that may misbehave, not members that
+    // never count -- so three honest votes plus that one reach the threshold,
+    // and the contradicting second vote is refused everywhere.
+    let fleet = 5;
+    let mut sea = Sea::new("twobad").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let common = ["--attempts", "2", "--ignore-acks"];
+    let mut ships: Vec<Ship> = (1..fleet)
+        .map(|i| {
+            let mut args: Vec<&str> = common.to_vec();
+            match i {
+                3 => args.extend_from_slice(&["--adversary", "double-vote"]),
+                4 => args.extend_from_slice(&["--adversary", "forge"]),
+                _ => {}
+            }
+            sea.launch_ship_with(i, fleet, &hub, false, &args)
+        })
+        .collect();
+    for ship in &ships {
+        assert!(ship.await_log("\"start\"", Duration::from_mins(1)));
+    }
+    ships.insert(0, sea.launch_ship_with(0, fleet, &hub, true, &common));
+
+    let finals = await_all(&ships, Duration::from_mins(3));
+    let honest = [0usize, 1, 2];
+    let forgeries: usize = honest
+        .iter()
+        .map(|i| count_in_log(&ships[*i], "\"why\":\"signature\""))
+        .sum();
+    let second_votes: usize = honest
+        .iter()
+        .map(|i| {
+            count_in_log(
+                &ships[*i],
+                "\"from\":3,\"why\":\"author already cast a binding vote\"",
+            )
+        })
+        .sum();
+    note(&format!(
+        "  dwoch wadliwych: {forgeries} odmow falszerza, {second_votes} odmow drugiego glosu, uczciwi poparc {} / prog {}",
+        finals[0].supporters, finals[0].threshold
+    ));
+    note_anomalies(&ships);
+
+    assert!(forgeries >= 3, "kazdy uczciwy odrzuca falszerza");
+    assert!(second_votes >= 3, "kazdy uczciwy odrzuca drugi glos");
+    for index in honest {
+        let result = &finals[index];
+        assert_eq!(result.threshold, 4);
+        assert_eq!(
+            result.supporters, 4,
+            "statek {index}: trzech uczciwych i pierwszy glos podwojnego"
+        );
+        assert!(
+            result.endorsed,
+            "statek {index}: cztery prawdziwe podpisy to prog"
+        );
     }
 }

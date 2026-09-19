@@ -4,8 +4,10 @@
 //! the storage it needs as a trait so the protocol can be simulated in memory
 //! and persisted to a database without either knowing about the other.
 
+mod budget;
 mod journal;
 mod queue;
 
+pub use budget::{AirtimeBudget, DUTY_CYCLE_BUDGET_MS, DUTY_CYCLE_WINDOW_MS, duty_cycle_ok};
 pub use journal::{Journal, JournalError, JournalSnapshot, OutgoingFrame};
 pub use queue::{Priority, QueueError, RadioQueue};

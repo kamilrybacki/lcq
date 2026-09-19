@@ -13,27 +13,15 @@ use crate::sim::phy::SENSITIVITY_DBM;
 /// Below the margin neither frame survives.
 pub const CAPTURE_THRESHOLD_DB: f64 = 6.0;
 
-/// Airtime a node may use per hour, in milliseconds.
-///
-/// EU 868 MHz sub-band g1 permits a 1 % duty cycle: 36 s in every 3600 s.
-/// Exceeding it is not a performance problem, it is unlawful transmission, so
-/// the simulator refuses the frame rather than charging for it.
-pub const DUTY_CYCLE_BUDGET_MS: u64 = 36_000;
+// The duty-cycle constant and check live with the application layer, which is
+// what a real transmitter uses; the simulator re-exports them so a scenario
+// and a node are metered by exactly the same rule.
+pub use crate::application::{DUTY_CYCLE_BUDGET_MS, duty_cycle_ok};
 
 /// Whether the first signal is far enough ahead of the second to be demodulated.
 #[must_use]
 pub fn capture_wins(stronger_dbm: f64, other_dbm: f64) -> bool {
     stronger_dbm - other_dbm >= CAPTURE_THRESHOLD_DB
-}
-
-/// Whether a node may legally send `next_ms` more airtime this hour.
-///
-/// The accumulator is a running total, not a sliding window. That is sound only
-/// because every scenario here is far shorter than the 3600 s the regulation
-/// measures over; a long-running node would need the window.
-#[must_use]
-pub fn duty_cycle_ok(used_ms: u64, next_ms: u64) -> bool {
-    used_ms.saturating_add(next_ms) <= DUTY_CYCLE_BUDGET_MS
 }
 
 /// One frame occupying the channel, as seen at a particular receiver.

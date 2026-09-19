@@ -850,3 +850,54 @@ It kills one vessel once, at one point in the round. Killing during the journal
 append itself is covered at the journal level by the every-offset truncation
 test, not end to end. Two vessels restarting at once, or one restarting twice,
 are not tried.
+
+---
+
+## D12 — The node meters its own airtime
+
+**Decided and measured 2026-09-19.**
+
+The simulator has refused transmissions over the 1 %-per-hour duty cycle since
+the radio model was built (D2). The node never did: it transmitted whatever the
+schedule asked for, and after D8, D10 and D11 it asks for more than it ever did
+— retries, repair requests, resends on request. That is exactly the traffic that
+pushes a real transmitter over its legal budget.
+
+`AirtimeBudget` now lives in the application layer, where a transmitter's rules
+belong; the simulator re-exports the same constant and the same check so a
+scenario and a node are metered by one rule. It is a sliding window over
+protocol time — a node may deliberate again next hour — and every one of the
+node's seven transmit paths goes through it. A refused frame is logged with the
+airtime it would have cost and dropped, never queued: by the time the budget
+frees up, the slot it was meant for is long gone. The attempt is spent all the
+same, so a refusal does not buy a second try at the same slot.
+
+Measured: a member with thirty-five of its thirty-six seconds already gone
+before the round refused all six transmissions it was asked for — three stage
+frames and three resends other members requested of it — and put nothing on
+the air, while the other four reached their threshold without it.
+
+One correction on the way: the send loop logged `sent` whether or not the frame
+went out. It now says so only when it did.
+
+---
+
+## D13 — The state machine against a reference model
+
+**Recorded 2026-09-19.** `tests/state_model.rs`.
+
+The unit tests each pin one rule. This drives `Case` through random histories —
+utterances from six members at every stage and verdict, closings, clock
+readings drawn to straddle every boundary the rules name and free to jump
+backwards, since the API accepts any `Clock` — and compares **every result** to
+a model written from the rules as documented: expiry first, one binding vote
+per author, support alone counts, consultation frozen once, a binding vote
+refused while validity is uncertain.
+
+Five hundred and twelve histories of up to forty steps agreed on the first run.
+That says two things: the machine does what its documentation says, and the
+documentation states every rule the machine applies. A second property test
+states the safety property without the model — however the history goes, the
+supporters are distinct members each of whom had a supporting binding vote
+admitted, and no dissenter is among them — so the claim does not rest on the
+model being right.

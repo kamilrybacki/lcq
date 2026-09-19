@@ -20,7 +20,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lcq::application::{Journal, OutgoingFrame};
+use lcq::application::{AirtimeBudget, Journal, OutgoingFrame};
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
@@ -182,6 +182,9 @@ fn main() {
     );
 
     let started = Instant::now();
+    // The legal airtime this node has left this hour. Every transmission goes
+    // through it; a refused frame is logged and not sent.
+    let mut budget = AirtimeBudget::with_prior(options.prior_airtime_ms);
     let mut link = Link::connect(&options.hub, options.index);
     let mut sent = [false; 3];
     let mut closed = false;
@@ -342,7 +345,7 @@ fn main() {
                 // run a whole airtime ahead of everybody else -- which lands its
                 // slot k on top of their slot k-1.
                 let air = Duration::from_millis(clock.wall_ms(airtime_ms(bytes.len())));
-                link.send(&bytes);
+                transmit(&mut link, &mut budget, &bytes, started, &options, &clock);
                 began = Some(Instant::now() + air);
                 clock = ScaledClock::new(epoch, options.scale, options.offset);
                 report(
@@ -464,7 +467,7 @@ fn main() {
                 &options,
                 second,
             ) {
-                link.send(&bytes);
+                transmit(&mut link, &mut budget, &bytes, started, &options, &clock);
                 report(&options, &clock, "{\"event\":\"equivocated\"}");
             }
         }
@@ -485,7 +488,7 @@ fn main() {
                             ^ u8::try_from(i % 256).unwrap_or(0)
                     })
                     .collect();
-                link.send(&junk);
+                transmit(&mut link, &mut budget, &junk, started, &options, &clock);
                 *next += Duration::from_millis(options.retry_gap_ms(&clock));
                 report(
                     &options,
@@ -503,7 +506,7 @@ fn main() {
             let first = anchor + Duration::from_millis(clock.wall_ms(starts[2] * 1_000));
             let next = replay_next.get_or_insert(first);
             if Instant::now() >= *next {
-                link.send(old);
+                transmit(&mut link, &mut budget, old, started, &options, &clock);
                 // Not half a window: that divides the schedule and lands on the
                 // same two slots every window, which is jamming, and the jam
                 // test covers jamming. This period drifts across the slots.
@@ -616,7 +619,10 @@ fn main() {
                 round,
             ) {
                 Ok(bytes) => {
-                    link.send(&bytes);
+                    // Spent whether or not it went out: a refused frame does not buy a
+                    // second try at the same slot.
+                    let went_out =
+                        transmit(&mut link, &mut budget, &bytes, started, &options, &clock);
                     attempts[index] += 1;
                     // Our own sequence goes in the window as well. Without it a
                     // replay of our own earlier frame passes the cheap check
@@ -659,15 +665,17 @@ fn main() {
                     if allowed == 1 {
                         sent[index] = true;
                     }
-                    report(
-                        &options,
-                        &clock,
-                        &format!(
-                            "{{\"event\":\"sent\",\"stage\":\"{}\",\"bytes\":{}}}",
-                            stage_name(stage),
-                            bytes.len()
-                        ),
-                    );
+                    if went_out {
+                        report(
+                            &options,
+                            &clock,
+                            &format!(
+                                "{{\"event\":\"sent\",\"stage\":\"{}\",\"bytes\":{}}}",
+                                stage_name(stage),
+                                bytes.len()
+                            ),
+                        );
+                    }
                 }
                 Err(why) => {
                     sent[index] = true;
@@ -714,7 +722,7 @@ fn main() {
                     round,
                 ) {
                     Ok(bytes) => {
-                        link.send(&bytes);
+                        transmit(&mut link, &mut budget, &bytes, started, &options, &clock);
                         let list: Vec<String> = missing.iter().map(ToString::to_string).collect();
                         report(
                             &options,
@@ -738,7 +746,7 @@ fn main() {
         {
             repair_due = None;
             if let Some(again) = journal.pending().next().map(|f| f.bytes().to_vec()) {
-                link.send(&again);
+                transmit(&mut link, &mut budget, &again, started, &options, &clock);
                 report(&options, &clock, "{\"event\":\"repaired\"}");
             }
         }
@@ -1302,6 +1310,38 @@ struct Admitted {
     heard: Heard,
 }
 
+/// Put a frame on the air if the duty cycle allows it.
+///
+/// Returns whether it went out. A refusal is logged with the airtime it would
+/// have cost; the frame is dropped, never queued -- by the time the budget
+/// frees up the slot it was meant for is long gone.
+fn transmit(
+    link: &mut Link,
+    budget: &mut AirtimeBudget,
+    bytes: &[u8],
+    started: Instant,
+    options: &Options,
+    clock: &impl Clock,
+) -> bool {
+    let air = airtime_ms(bytes.len());
+    let now_ms = u64::try_from(started.elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::from(options.scale));
+    if budget.transmit(now_ms, air) {
+        link.send(bytes);
+        return true;
+    }
+    report(
+        options,
+        clock,
+        &format!(
+            "{{\"event\":\"duty_blocked\",\"airtime_ms\":{air},\"used_ms\":{}}}",
+            budget.used_ms(now_ms)
+        ),
+    );
+    false
+}
+
 /// The socket to the channel emulator, with its reader on its own thread.
 struct Link {
     stream: TcpStream,
@@ -1372,6 +1412,7 @@ struct Options {
     attempts: usize,
     ignore_acks: bool,
     adversary: Adversary,
+    prior_airtime_ms: u64,
 }
 
 impl Options {
@@ -1409,6 +1450,9 @@ impl Options {
                 .unwrap_or(1),
             ignore_acks: args.iter().any(|a| a == "--ignore-acks"),
             adversary: Adversary::parse(value("--adversary").as_deref()),
+            prior_airtime_ms: value("--prior-airtime-ms")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 
