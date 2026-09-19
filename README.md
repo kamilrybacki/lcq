@@ -16,13 +16,16 @@ compromised.
 
 ## Status
 
-**Implemented through D16.** Signed and sealed frames, a durable append-only
+**Implemented through D22.** Signed and sealed frames, a durable append-only
 journal, slotted access anchored on the trigger, receiver-driven repair,
-relaying, six adversary modes, and a node that runs as a real process against
-a channel emulator -- or against a virtual SX1262 under the real `lora-phy`
-driver. `docs/HANDOFF.md` has the state and the measurements; `docs/DECISIONS.md`
-has what a later session must not silently reverse. The quorum arithmetic below
-is where it all started and is unchanged.
+relaying, six adversary modes (test builds only), and a node that runs as a
+real process against a channel emulator -- or against a virtual SX1262 under
+the real `lora-phy` driver -- with two adapters onto real boards that no board
+has tried yet. `docs/HANDOFF.md` has the state and the measurements;
+`docs/DECISIONS.md` has what a later session must not silently reverse;
+`docs/THREAT-MODEL.md` has the security audit and what still keeps this from
+being a deployable node. The quorum arithmetic below is where it all started
+and is unchanged.
 
 ## Usage
 
@@ -104,6 +107,20 @@ lcq-node --index 1 --fleet 5 --slots --journal ship1.log \
 
 Both live behind the `hardware` cargo feature, on by default. Members on
 hardware need no hub: the air is the medium.
+
+## Security
+
+`docs/THREAT-MODEL.md` is the audit: assets, trust boundaries, adversaries,
+STRIDE per component and twenty findings, with an independent second review
+merged in. What the node defends today: forged, tampered, replayed and
+cross-case frames, tallies inflated by lies about acknowledgements, and nonce
+reuse after a lost journal. What it does not have yet, and what makes it an
+integration harness rather than a deployable secure fleet node: provisioning
+(the group key and the member keys are constants in the binary), a signed
+manifest and epoch lifecycle for rotation and exclusion, a rollback rule for a
+restored journal, and replay state that survives a restart. The adversary
+modes exist only in builds with `--features harness`; a release build refuses
+`--adversary`.
 
 ## Development
 
