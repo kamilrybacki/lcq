@@ -146,13 +146,43 @@ fn the_signature_covers_a_domain_separated_transcript() {
 }
 
 #[test]
-fn a_compact_frame_reaches_the_mid_range_spreading_factor() {
+fn the_compact_form_costs_less_airtime_once_names_are_realistic() {
     // Strings are a luxury the radio cannot afford: the manifest already knows
-    // every member and mission, so the wire carries indices into it. This is
-    // what gets a core vote under the SF10 payload limit of 133 bytes.
-    use lcq::wire::CompactEnvelope;
+    // every member and mission, so the wire carries indices into it.
+    //
+    // This used to assert a 133-byte "SF10 payload limit". That is another
+    // LoRaWAN application cap, not a LoRa one -- the same false premise
+    // `DECISIONS.md` D2 corrected elsewhere. Raw LoRa carries 255 bytes at every
+    // spreading factor; what a frame cannot afford is the time.
+    //
+    // The comparison needs identifiers a real fleet would use. Against "n12"
+    // the compact form saves nothing and, since it now also carries an eight
+    // byte acknowledgement, costs slightly more -- which says only that the
+    // test was measuring toy names.
+    use lcq::domain::contracts::{Stage, Subject, Verdict};
+    use lcq::sim::airtime_ms;
+    use lcq::wire::{CompactEnvelope, Envelope, seal_frame};
 
     let signer = SigningKey::from_seed([1; 32]);
+    let group = GroupKey::from_bytes([9; 32]);
+
+    let named = Subject::new(
+        "baltic-winter-patrol-2026",
+        "grounding-risk-report-0417",
+        0,
+        [0x5A; 32],
+        Timestamp::from_secs(1_700_000_000),
+    )
+    .expect("valid subject");
+    let readable = Envelope::new(
+        &named,
+        "MV Stena Nordica",
+        Stage::BindingSupport,
+        Verdict::Support,
+        4_242,
+    );
+    let readable = encode(&readable.sign(&signer)).expect("encodes");
+
     let compact = CompactEnvelope::new(
         7,
         0x0001_E240,
@@ -164,12 +194,29 @@ fn a_compact_frame_reaches_the_mid_range_spreading_factor() {
         1,
         4_242,
     );
-    let bytes = encode_compact(&compact.sign(&signer)).expect("encodes");
-    let sealed = seal(&GroupKey::from_bytes([9; 32]), 3, 4_242, &bytes).expect("seals");
+    let compact = encode_compact(&compact.sign(&signer)).expect("encodes");
+
+    let readable_air = airtime_ms(
+        seal_frame(&group, 12, 4_242, &readable)
+            .expect("seals")
+            .len(),
+    );
+    let compact_air = airtime_ms(
+        seal_frame(&group, 12, 4_242, &compact)
+            .expect("seals")
+            .len(),
+    );
+
     assert!(
-        sealed.len() <= 133,
-        "compact sealed frame is {} B, over the SF10 limit",
-        sealed.len()
+        compact_air < readable_air,
+        "compact {compact_air} ms against readable {readable_air} ms"
+    );
+    // Every frame this protocol will ever send pays this, so the saving is
+    // worth stating as a proportion rather than a byte count.
+    assert!(
+        compact_air * 5 < readable_air * 4,
+        "the compact form should save at least a fifth of the airtime: \
+         {compact_air} ms against {readable_air} ms"
     );
 }
 
@@ -250,4 +297,75 @@ fn a_frame_shorter_than_its_header_is_refused_not_guessed() {
     let group = GroupKey::from_bytes([0x5a; 32]);
     assert!(open_frame(&group, &[0u8; FRAME_HEADER_BYTES]).is_err());
     assert!(open_frame(&group, &[]).is_err());
+}
+
+#[test]
+fn an_acknowledgement_records_exactly_who_was_heard() {
+    use lcq::wire::Heard;
+
+    let mut heard = Heard::none();
+    assert_eq!(heard.count(), 0);
+    heard.heard_from(0);
+    heard.heard_from(7);
+    heard.heard_from(63);
+    assert!(heard.contains(0) && heard.contains(7) && heard.contains(63));
+    assert!(!heard.contains(1) && !heard.contains(62));
+    assert_eq!(heard.count(), 3);
+}
+
+#[test]
+fn an_index_past_the_capacity_is_dropped_rather_than_wrapped() {
+    // Dropping costs a retransmission. Wrapping would silence the wrong member,
+    // which is a correctness failure dressed as an optimisation.
+    use lcq::wire::Heard;
+
+    let mut heard = Heard::none();
+    heard.heard_from(64);
+    heard.heard_from(1_000);
+    assert_eq!(heard.count(), 0);
+    assert!(!heard.contains(0));
+}
+
+#[test]
+fn the_acknowledgement_is_covered_by_the_signature() {
+    // Otherwise anyone could rewrite it in flight and silence a member that had
+    // not in fact been heard.
+    use lcq::wire::{CompactEnvelope, Heard, decode_compact};
+
+    let signer = SigningKey::from_seed([1; 32]);
+    let base = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1);
+    let mut heard = Heard::none();
+    heard.heard_from(4);
+
+    assert_ne!(
+        base.transcript(),
+        base.clone().acknowledging(heard).transcript(),
+        "the bitmap must change what is signed"
+    );
+    // And a frame whose bitmap was rewritten after signing no longer verifies.
+    let signed = base.clone().acknowledging(heard).sign(&signer);
+    let bytes = encode_compact(&signed).expect("encodes");
+    let tampered = decode_compact(&bytes).expect("decodes");
+    assert!(tampered.verify(&signer.verifying_key()).is_ok());
+    let forged = base.acknowledging(Heard::none()).sign(&signer);
+    assert_ne!(
+        encode_compact(&forged).expect("encodes"),
+        bytes,
+        "two different bitmaps must not encode identically"
+    );
+}
+
+#[test]
+fn an_acknowledgement_survives_the_round_trip() {
+    use lcq::wire::{CompactEnvelope, Heard, decode_compact};
+
+    let signer = SigningKey::from_seed([1; 32]);
+    let mut heard = Heard::none();
+    heard.heard_from(2);
+    heard.heard_from(9);
+    let envelope = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1).acknowledging(heard);
+    let bytes = encode_compact(&envelope.sign(&signer)).expect("encodes");
+    let back = decode_compact(&bytes).expect("decodes");
+    assert_eq!(back.envelope().heard(), heard);
+    assert!(back.verify(&signer.verifying_key()).is_ok());
 }

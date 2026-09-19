@@ -28,7 +28,7 @@ use lcq::domain::time::{Clock, MAX_CLOCK_SKEW_SECONDS, Timestamp};
 use lcq::infrastructure::{LogJournal, ScaledClock};
 use lcq::sim::airtime_ms;
 use lcq::wire::{
-    CompactEnvelope, GroupKey, SigningKey, VerifyingKey, decode_compact, encode_compact,
+    CompactEnvelope, GroupKey, Heard, SigningKey, VerifyingKey, decode_compact, encode_compact,
     open_frame, seal_frame,
 };
 
@@ -92,6 +92,12 @@ fn main() {
     let mut sent = [false; 3];
     let mut closed = false;
     let mut began: Option<Instant> = None;
+    // Who this node has heard cast a binding vote, and whether anybody has
+    // reported hearing this node. Both ride on frames already being sent, so
+    // acknowledgement costs eight bytes rather than a frame of its own.
+    let mut heard = Heard::none();
+    let mut acknowledged = false;
+    let mut attempts = [0usize; 3];
 
     let stage_window = options.stage_window_s();
     // The first stage cannot open the instant the trigger ends: leave more
@@ -103,7 +109,10 @@ fn main() {
         lead_in + stage_window,
         CONSULTATION_CUTOFF_SECONDS + MAX_CLOCK_SKEW_SECONDS + 1,
     ];
-    let finish = starts[2] + stage_window + 5;
+    // The binding stage has to be long enough for every attempt it allows,
+    // or the run ends before the retries it was configured for and the
+    // measurement is of the window rather than of anything else.
+    let finish = starts[2] + stage_window * options.attempts.max(1) as u64 + 5;
 
     // Transmission times are wall-clock instants, not whole protocol seconds.
     // A frame is 1.3 protocol seconds long, so scheduling to the second puts
@@ -194,24 +203,65 @@ fn main() {
         .into_iter()
         .enumerate()
         {
-            if sent[index] || Instant::now() < anchor + Duration::from_millis(offsets[index]) {
+            // Only the binding vote is worth repeating, and only until somebody
+            // reports having heard it. Repeating blind costs about four and a
+            // half times the airtime for nothing (`DECISIONS.md` D4).
+            let allowed = if stage == Stage::BindingSupport {
+                options.attempts
+            } else {
+                1
+            };
+            if attempts[index] >= allowed || sent[index] {
+                continue;
+            }
+            let due = anchor
+                + Duration::from_millis(
+                    offsets[index] + attempts[index] as u64 * options.retry_gap_ms(&clock),
+                );
+            if Instant::now() < due {
                 continue;
             }
             if stage == Stage::BindingSupport && !closed {
                 continue;
             }
-            match build(stage, &subject, &keys, &group, &mut journal, &options) {
+            if stage == Stage::BindingSupport && attempts[index] > 0 && acknowledged {
+                sent[index] = true;
+                report(
+                    &options,
+                    &clock,
+                    &format!(
+                        "{{\"event\":\"acknowledged\",\"after_attempts\":{}}}",
+                        attempts[index]
+                    ),
+                );
+                continue;
+            }
+            match build(
+                stage,
+                &subject,
+                &keys,
+                &group,
+                &mut journal,
+                &options,
+                heard,
+            ) {
                 Ok(bytes) => {
                     link.send(&bytes);
+                    attempts[index] += 1;
                     // A node needs no radio to know its own utterance, and the
                     // emulator does not echo. Without this its own binding vote
                     // is missing from its own tally -- which happened to clear
                     // the threshold for a fleet of five and would not have for
                     // any other size.
-                    admit(
+                    let learned = admit(
                         &bytes, &subject, &manifest, &group, &mut case, &clock, &options,
                     );
-                    sent[index] = true;
+                    if let Some(from) = learned.binding_from {
+                        heard.heard_from(from);
+                    }
+                    if allowed == 1 {
+                        sent[index] = true;
+                    }
                     report(
                         &options,
                         &clock,
@@ -224,6 +274,7 @@ fn main() {
                 }
                 Err(why) => {
                     sent[index] = true;
+                    attempts[index] = allowed;
                     report(
                         &options,
                         &clock,
@@ -243,9 +294,19 @@ fn main() {
         if let Some(frame) = link.poll()
             && !is_trigger(&frame, &group)
         {
-            admit(
+            let learned = admit(
                 &frame, &subject, &manifest, &group, &mut case, &clock, &options,
             );
+            if let Some(from) = learned.binding_from {
+                heard.heard_from(from);
+            }
+            // Somebody reported hearing us, so repeating ourselves would buy
+            // nothing. Advisory only: a liar can silence one member per round,
+            // which is a liveness attack of the same class as jamming a slot
+            // and never lets anyone forge a signature.
+            if learned.acknowledges_us && !options.ignore_acks {
+                acknowledged = true;
+            }
         }
 
         if now >= finish {
@@ -262,11 +323,12 @@ fn main() {
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote}}}",
+            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged}}}",
             options.index,
             supporters.len(),
             policy.min_signers(),
-            approved
+            approved,
+            attempts[2]
         ),
     );
 }
@@ -283,6 +345,7 @@ fn build(
     group: &GroupKey,
     journal: &mut LogJournal,
     options: &Options,
+    heard: Heard,
 ) -> Result<Vec<u8>, String> {
     let voter = member_id(options.index);
     if stage == Stage::BindingSupport && journal.has_voted(subject, &voter) {
@@ -307,7 +370,8 @@ fn build(
         stage_code(stage),
         1,
         sequence,
-    );
+    )
+    .acknowledging(heard);
     let signed = encode_compact(&envelope.sign(&keys[options.index])).map_err(|e| e.to_string())?;
     let sealed = seal_frame(group, author, sequence, &signed).map_err(|e| e.to_string())?;
 
@@ -368,12 +432,13 @@ fn admit(
     case: &mut Case,
     clock: &impl Clock,
     options: &Options,
-) {
+) -> Admitted {
+    let mut learned = Admitted::default();
     let Ok((_, _, plain)) = open_frame(group, sealed) else {
-        return;
+        return learned;
     };
     let Ok(received) = decode_compact(&plain) else {
-        return;
+        return learned;
     };
     let claimed = received.envelope().author_index() as usize;
     if claimed >= manifest.len() || received.verify(&manifest[claimed]).is_err() {
@@ -382,30 +447,49 @@ fn admit(
             clock,
             "{\"event\":\"refused\",\"why\":\"signature\"}",
         );
-        return;
+        return learned;
     }
+    // Whatever the state machine decides about the utterance, the sender's
+    // report of who IT heard is signed and worth reading -- that is the whole
+    // point of carrying it.
+    learned.acknowledges_us = received.envelope().heard().contains(options.index);
     let (Some(stage), Some(verdict)) = (
         stage_of(received.envelope().stage()),
         verdict_of(received.envelope().verdict()),
     ) else {
-        return;
+        return learned;
     };
     let opinion = Opinion::new(&member_id(claimed), subject.clone(), stage, verdict);
     match case.accept(opinion, clock) {
-        Ok(()) => report(
-            options,
-            clock,
-            &format!(
-                "{{\"event\":\"admitted\",\"from\":{claimed},\"stage\":\"{}\"}}",
-                stage_name(stage)
-            ),
-        ),
+        Ok(()) => {
+            if stage == Stage::BindingSupport {
+                learned.binding_from = Some(claimed);
+            }
+            report(
+                options,
+                clock,
+                &format!(
+                    "{{\"event\":\"admitted\",\"from\":{claimed},\"stage\":\"{}\"}}",
+                    stage_name(stage)
+                ),
+            );
+        }
         Err(error) => report(
             options,
             clock,
             &format!("{{\"event\":\"refused\",\"from\":{claimed},\"why\":\"{error}\"}}"),
         ),
     }
+    learned
+}
+
+/// What reading one frame taught this node.
+#[derive(Debug, Default, Clone, Copy)]
+struct Admitted {
+    /// A binding vote was admitted from this member.
+    binding_from: Option<usize>,
+    /// The sender reports having heard us, so we need not repeat ourselves.
+    acknowledges_us: bool,
 }
 
 /// The socket to the channel emulator, with its reader on its own thread.
@@ -475,6 +559,8 @@ struct Options {
     guard_ms: u64,
     trigger: bool,
     trigger_delay_ms: u64,
+    attempts: usize,
+    ignore_acks: bool,
 }
 
 impl Options {
@@ -504,6 +590,10 @@ impl Options {
             trigger_delay_ms: value("--trigger-delay-ms")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            attempts: value("--attempts")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+            ignore_acks: args.iter().any(|a| a == "--ignore-acks"),
         }
     }
 
@@ -518,6 +608,12 @@ impl Options {
 
     fn slot_ms(&self) -> u64 {
         airtime_ms(137) + self.guard_ms
+    }
+
+    /// Wall milliseconds between retransmissions: one whole round, so a repeat
+    /// lands in this member's slot again rather than in somebody else's.
+    fn retry_gap_ms(&self, clock: &ScaledClock) -> u64 {
+        clock.wall_ms(self.stage_window_s() * 1_000)
     }
 
     /// Protocol milliseconds into a stage before this node transmits.

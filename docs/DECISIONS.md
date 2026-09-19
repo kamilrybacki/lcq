@@ -540,3 +540,61 @@ Three things the containers forced that processes on one host did not:
   verdict.** It recovers its lock, declines to decide again, and waits. The test
   asserts the silence, because a refloated member announcing an outcome for a
   round it missed would be exactly the fabrication this protocol forbids.
+
+---
+
+## D8 — Acknowledgement rides on the frames already being sent
+
+**Decided and measured 2026-09-19.** Implements the largest item D4 left open.
+
+### The cost of not having one
+
+The simulator let a sender stop retrying once its frame was decoded, which
+assumes it somehow *learns* it was heard. Nothing carried that.
+`Journal::acknowledge` exists at the storage layer; no frame said it. D4 priced
+the assumption at roughly four and a half times the airtime.
+
+### Eight bytes, no extra frames
+
+Every binding frame now carries `Heard`: one bit per manifest index, for the
+members its sender has admitted a binding vote from. It rides on frames the
+protocol already sends, so acknowledgement costs **eight bytes rather than a
+frame** — 1313 ms to 1354 ms of airtime, about 3 %.
+
+It is covered by the signature, so it cannot be rewritten in flight or lifted
+onto another frame.
+
+### Measured across five containers
+
+Both fleets allowed four attempts at their binding vote; one reads the
+acknowledgements, one is told to ignore them.
+
+| | attempts spent | members acknowledged |
+|---|---:|---:|
+| ignoring acknowledgements | 20 | 0 / 5 |
+| reading them | **8** | 4 / 5 |
+
+**Two and a half times fewer transmissions**, for 3 % more per frame. The fifth
+member is the one in the last slot: nobody transmits after it in the first
+round, so nobody has anything to report about it yet, and it spends one extra
+attempt. That is inherent to a slotted order, not a defect.
+
+### Advisory, never binding
+
+A member can lie about what it heard and silence somebody who was not. That is a
+liveness attack of the same class as jamming a slot (D6): no bitmap and no
+schedule lets anyone forge a signature, so a fleet fed lies **blocks rather than
+approves**, and the count threshold is still decided by signatures alone. A
+receiver therefore treats the bitmap as a reason to stop early and never as
+proof.
+
+Sixty-four members is the ceiling, because one `u64` of bits is what a frame can
+spare. An index past that is dropped rather than wrapped: dropping costs a
+retransmission, wrapping would silence the wrong member.
+
+### Found while building it
+
+The binding stage ended before the retries it was configured for, so the first
+measurement was of the stage window rather than of acknowledgement — both fleets
+spent nine attempts and the difference was invisible. The stage is now long
+enough for every attempt it allows.

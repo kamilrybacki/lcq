@@ -188,6 +188,18 @@ impl Sea {
     /// still starting is a round opened for nobody, and a fixed delay would be
     /// a guess about how long Docker takes today.
     fn launch_ship(&mut self, index: usize, fleet: usize, hub: &str, opens_round: bool) -> Ship {
+        self.launch_ship_with(index, fleet, hub, opens_round, &[])
+    }
+
+    /// The same, with extra arguments handed to the node process.
+    fn launch_ship_with(
+        &mut self,
+        index: usize,
+        fleet: usize,
+        hub: &str,
+        opens_round: bool,
+        extra: &[&str],
+    ) -> Ship {
         let name = format!("{}-ship{index}", self.network);
         let journal_dir = self.scratch.join(format!("ship{index}"));
         std::fs::create_dir_all(&journal_dir).expect("journal dir");
@@ -215,6 +227,7 @@ impl Sea {
             command.push("--trigger-delay-ms".into());
             command.push("1500".into());
         }
+        command.extend(extra.iter().map(ToString::to_string));
         let mount = format!("{}:/journal", journal_dir.display());
         // As the invoking user, not root. A vessel's node has no business
         // running as root, and it also means the journal it leaves behind is
@@ -401,6 +414,22 @@ impl Ship {
     }
 }
 
+/// Put a fleet to sea with extra node arguments.
+fn put_to_sea_with(sea: &mut Sea, fleet: usize, hub: &str, extra: &[&str]) -> Vec<Ship> {
+    let mut ships: Vec<Ship> = (1..fleet)
+        .map(|i| sea.launch_ship_with(i, fleet, hub, false, extra))
+        .collect();
+    for ship in &ships {
+        assert!(
+            ship.await_log("\"start\"", Duration::from_secs(60)),
+            "jednostka {} nie wstala",
+            ship.index
+        );
+    }
+    ships.insert(0, sea.launch_ship_with(0, fleet, hub, true, extra));
+    ships
+}
+
 /// What a vessel concluded.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -409,6 +438,8 @@ struct Final {
     threshold: usize,
     endorsed: bool,
     recovered_vote: bool,
+    binding_attempts: usize,
+    acknowledged: bool,
 }
 
 fn last_final(logs: &str) -> Option<Final> {
@@ -420,6 +451,8 @@ fn last_final(logs: &str) -> Option<Final> {
             threshold: field(line, "\"threshold\":"),
             endorsed: line.contains("\"endorsed\":true"),
             recovered_vote: line.contains("\"recovered_vote\":true"),
+            binding_attempts: field(line, "\"binding_attempts\":"),
+            acknowledged: line.contains("\"acknowledged\":true"),
         })
 }
 
@@ -667,5 +700,70 @@ fn a_larger_fleet_costs_no_more_time_than_a_small_one() {
             "statek {} ma zla liczbe blokad",
             ship.index
         );
+    }
+}
+
+#[test]
+fn acknowledgement_stops_the_fleet_repeating_itself() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // The measured case for carrying eight bytes of "who I heard" on frames the
+    // protocol already sends. Both fleets are allowed four attempts at their
+    // binding vote; one reads the acknowledgements and one is told to ignore
+    // them. Airtime is what the duty cycle meters, so the attempts a member
+    // spends are the number that matters (`DECISIONS.md` D4).
+    let fleet = 5;
+
+    let mut deaf_sea = Sea::new("ack-deaf").expect("sea");
+    let deaf_hub = deaf_sea.launch_hub(fleet);
+    let deaf = put_to_sea_with(
+        &mut deaf_sea,
+        fleet,
+        &deaf_hub,
+        &["--attempts", "4", "--ignore-acks"],
+    );
+    let deaf_finals: Vec<Final> = deaf
+        .iter()
+        .map(|ship| {
+            ship.await_final(Duration::from_secs(180))
+                .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
+        })
+        .collect();
+    drop(deaf);
+    drop(deaf_sea);
+
+    let mut sea = Sea::new("ack-hearing").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let hearing = put_to_sea_with(&mut sea, fleet, &hub, &["--attempts", "4"]);
+    let finals: Vec<Final> = hearing
+        .iter()
+        .map(|ship| {
+            ship.await_final(Duration::from_secs(180))
+                .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
+        })
+        .collect();
+
+    let deaf_attempts: usize = deaf_finals.iter().map(|f| f.binding_attempts).sum();
+    let heard_attempts: usize = finals.iter().map(|f| f.binding_attempts).sum();
+    let acknowledged = finals.iter().filter(|f| f.acknowledged).count();
+    note(&format!(
+        "  prob glosu wiazacego: {deaf_attempts} bez potwierdzen, {heard_attempts} z potwierdzeniami ({acknowledged}/{fleet} uslyszalo potwierdzenie)"
+    ));
+
+    assert!(
+        heard_attempts < deaf_attempts,
+        "potwierdzenia musza zmniejszyc liczbe prob: {heard_attempts} wobec {deaf_attempts}"
+    );
+    assert!(
+        acknowledged > 0,
+        "nikt nie zobaczyl wlasnego bitu w cudzej ramce"
+    );
+    // And it must not have cost the quorum.
+    for (index, result) in finals.iter().enumerate() {
+        assert_eq!(result.supporters, fleet, "statek {index} policzyl inaczej");
+        assert!(result.endorsed);
     }
 }

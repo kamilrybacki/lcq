@@ -27,6 +27,69 @@ extern crate alloc;
 
 const COMPACT_DOMAIN: &[u8] = b"lcq-v1-compact";
 
+/// Which members the sender has heard, as one bit each.
+///
+/// Rides on frames the protocol already sends, so acknowledgement costs eight
+/// bytes rather than a frame. A member that sees its own bit set somewhere
+/// knows it was heard and can stop retransmitting -- and retransmitting blind,
+/// which is the alternative, costs about four and a half times the airtime
+/// (`DECISIONS.md` D4).
+///
+/// **Advisory, never binding.** It is signed, so nobody can alter it in
+/// flight, but a member can still lie about what it heard and silence somebody
+/// who was not. That is a liveness attack of the same class as jamming a slot:
+/// no schedule and no bitmap lets anyone forge a signature, so a fleet fed lies
+/// blocks rather than approves. A receiver therefore treats this as a reason to
+/// stop *early*, never as proof, and the count threshold is still decided by
+/// signatures alone.
+///
+/// Sixty-four members, because one `u64` of bits is what a frame can spare.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Heard([u8; 8]);
+
+impl Heard {
+    /// Nobody heard yet.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self([0; 8])
+    }
+
+    /// The largest manifest index this can record.
+    pub const CAPACITY: usize = 64;
+
+    /// Record that `index` was heard. Indices past the capacity are dropped,
+    /// which costs a retransmission and never a wrong answer.
+    pub const fn heard_from(&mut self, index: usize) {
+        if index < Self::CAPACITY {
+            self.0[index / 8] |= 1 << (index % 8);
+        }
+    }
+
+    /// Whether `index` is recorded.
+    #[must_use]
+    pub const fn contains(&self, index: usize) -> bool {
+        index < Self::CAPACITY && self.0[index / 8] & (1 << (index % 8)) != 0
+    }
+
+    /// How many members are recorded.
+    #[must_use]
+    pub const fn count(&self) -> u32 {
+        let mut total = 0;
+        let mut at = 0;
+        while at < 8 {
+            total += self.0[at].count_ones();
+            at += 1;
+        }
+        total
+    }
+
+    /// The raw bits, for a wire format that wants them.
+    #[must_use]
+    pub const fn bytes(&self) -> [u8; 8] {
+        self.0
+    }
+}
+
 /// A core utterance addressed by manifest indices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactEnvelope {
@@ -39,6 +102,7 @@ pub struct CompactEnvelope {
     stage: u8,
     verdict: u8,
     sequence: u64,
+    heard: Heard,
 }
 
 impl CompactEnvelope {
@@ -66,6 +130,7 @@ impl CompactEnvelope {
             stage,
             verdict,
             sequence,
+            heard: Heard::none(),
         }
     }
 
@@ -98,6 +163,19 @@ impl CompactEnvelope {
         self.verdict
     }
 
+    /// The same envelope, reporting who the sender has heard.
+    #[must_use]
+    pub const fn acknowledging(mut self, heard: Heard) -> Self {
+        self.heard = heard;
+        self
+    }
+
+    /// Who the sender reports having heard.
+    #[must_use]
+    pub const fn heard(&self) -> Heard {
+        self.heard
+    }
+
     /// The bytes a signature covers, domain-separated from the readable form so
     /// a signature over one can never verify as the other.
     #[must_use]
@@ -108,6 +186,10 @@ impl CompactEnvelope {
         hasher.update(self.mission_epoch.to_be_bytes());
         hasher.update(self.event.to_be_bytes());
         hasher.update(self.revision.to_be_bytes());
+        // Signed, so the acknowledgement cannot be altered in flight or lifted
+        // onto another frame. It can still be a lie by its author, which is why
+        // a receiver treats it as advisory.
+        hasher.update(self.heard.bytes());
         hasher.update(self.content_hash);
         hasher.update(self.started_at.to_be_bytes());
         hasher.update(self.author_index.to_be_bytes());
