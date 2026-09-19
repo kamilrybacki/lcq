@@ -353,46 +353,57 @@ every non-container test, the hub baseline, and the full suite on the virtual
 SX1262 (20 of 20, 631 s) with the generic driver and the static musl build
 carrying the hardware crates. Upstream: https://github.com/lora-rs/lora-rs/pull/487.
 
+### Security audit and threat model (D22)
+
+`THREAT-MODEL.md`: assets, trust boundaries, six adversary classes, STRIDE per
+component, twenty findings with severity and status, and Hermes's
+independent static review merged. Fixed on the spot: a journal that feeds
+nonces starts at a random sequence and never from zero (`open_with_entropy`);
+replay windows are seeded from the journal at start; adversary modes live
+behind the `harness` feature and a production build refuses the flag; the
+fleet size is capped at the acknowledgement bitmap; a sequence past the round
+label is refused, not truncated; the journal is created 0600; CI actions are
+pinned by commit; RNode firmware versions are logged. Both reviews agree on
+the verdict: the wire crypto and crash ordering are sound, and the binary is
+an integration harness until provisioning, a signed manifest and epoch
+lifecycle, rollback-resistant nonce state and persisted replay state exist.
+
 ### What to pick up next
 
-1. **Hardware qualification** (roadmap M8): both adapters exist (D21) and
+1. **Provisioning and key lifecycle** (THREAT-MODEL F4, F5, F18) — before any
+   vessel: signed manifest with digest, epoch and validity; per-member keys
+   on the device; group key per epoch from Vault/sops through Morsik; fail
+   closed on fixture keys and on a missing or restored journal. This is the
+   product's decision to make and the protocol's to enforce.
+2. **Hardware qualification** (roadmap M8): both adapters exist (D21) and
    have never seen a board. Two SX1262 boards first -- RNode firmware over USB
    needs no firmware work -- then five. First measurements, wired through
    attenuators: bring-up on both adapters, `SetTx` to `TxDone`, `SetRx` to the
    first catchable preamble, the late-listener and capture thresholds the
    model guesses at, CAD latency, sleep/wake.
-2. **Chip model fidelity**, from Hermes's review of D16 (Discord, 2026-09-19
-   15:35 UTC) and D16's own list. Ready for a first hardware pass of the
-   driver and state machine; not ready for claims about capture or collision
-   behaviour; CAD not ready as a protocol mechanism. Before hardware:
-   freeze one versioned PHY profile (region, SF, BW, CR, preamble, header
-   mode, CRC, sync word, IQ, LDRO, power, RX timeout, CAD parameters) and
-   compare emulator and boards on it, never on defaults; make the medium
-   distinguish no-preamble-lock, locked-but-corrupted and decoded, and carry
-   `HeaderErr` next to `CrcErr` in telemetry (neither may reach the parser);
-   make capture time-aware -- acquisition window against payload lock, the
-   LoRaSim rule as the start -- with its parameters in the profile, not a
-   global 6 dB (the late-listener threshold is already derived from the
-   configured preamble -- six symbols to lock, boundary tests at two preamble
-   lengths -- and a CRC-failed frame is telemetry on both adapters); give CAD a deliberately simple, profiled state
-   machine (`CadDone` with and without `CadDetected`, weak, no match) but
-   never "any frame in flight means detected"; and expose the `chip_missed`
-   counters as a metric the suite watches. On hardware: measure `SetTx` to
-   `TxDone`, `SetRx` to first catchable preamble, `RxDone`/`CrcErr` to FIFO
-   read, CAD latency, sleep/wake recovery and half-duplex overlap -- wired
-   through attenuators, a combiner and a shielded box before any antenna.
-   Do not grow the emulator further before those measurements exist.
-3. **Short case reference** (D4) — 23 % off every frame, no security traded.
+3. **Chip model fidelity** — what is left of Hermes's review of D16 after
+   D19: the medium's three outcomes, time-aware capture, the CAD state
+   machine, the derived late-listener threshold and the `chip_missed`
+   assertion are done. Still open: calibrate the lock, capture and header
+   windows on hardware (measure `SetTx` to `TxDone`, `SetRx` to the first
+   catchable preamble, `RxDone`/`CrcErr` to FIFO read, CAD latency,
+   sleep/wake recovery and half-duplex overlap, wired through attenuators, a
+   combiner and a shielded box before any antenna), and do not grow the
+   emulator further before those measurements exist. CAD stays out of the
+   protocol until then.
 4. `RadioQueue` is what the node carries other members' votes with, on request
    (D15). The distress class exists and nothing yet uses it; the first
    application traffic that is genuinely urgent should.
-5. From review: per-sender replay windows with retention limits, cheap rejection
-   of senders outside the manifest.
+5. **Per-sender budgets before verification** (THREAT-MODEL F10): triggers,
+   requests and frames per member per window, refused before the signature
+   check and recorded as evidence when exceeded. Cheap; turns the
+   `verifications` meter into a defence.
 6. Evidence of misbehaviour is held locally (four frames) and reported in the
    log; there is no exclusion procedure. That is governance, not protocol, and
    needs a product decision before it is built.
-7. Hub fidelity: port LoRaSim's preamble-relative capture rule; calibrate
-   `sensitivity_dbm_at` and `capture_wins` with `gr-lora_sdr` tables (D16).
+7. Hub calibration: `sensitivity_dbm_at`, the capture threshold and the lock
+   window against `gr-lora_sdr` FER and capture tables, or against the
+   hardware matrix above -- whichever comes first (D16, D19).
 8. The replay page (https://claude.ai/artifact/7ArnQomVMHiArWiZyUzfWp, version 8)
    now shows the D20 frame: 122 bytes on the air, a slot sized to 152.
    `examples/trace.rs` measures both from the wire format instead of carrying

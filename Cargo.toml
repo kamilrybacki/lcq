@@ -35,3 +35,6 @@ pedantic = { level = "warn", priority = -1 }
 default = ["hardware"]
 # Real radios: an RNode on a serial port, an SX1262 on spidev and GPIO.
 hardware = ["dep:serial2", "dep:spidev", "dep:gpio-cdev"]
+# The container harness's adversary modes on `lcq-node --adversary`. Never in a
+# production build: without it the flag refuses to run.
+harness = []

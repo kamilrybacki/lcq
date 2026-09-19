@@ -1252,3 +1252,35 @@ suite builds them into the static binaries and never exercises them. What
 would justify revisiting: the first board. Every timing in the Linux bus --
 BUSY timeout, DIO1 polling, reset pulse -- is a datasheet figure or a guess,
 and Hermes's measurement matrix (handoff) is where they get replaced.
+
+---
+
+## D22 — What the security audit changed, and what it left to the product
+
+**Decided and implemented 2026-09-19.** The audit is `THREAT-MODEL.md`; this
+records the decisions it forced.
+
+- **A journal that feeds nonces never starts from zero.** `LogJournal::open`
+  counts from zero, for tools and tests; `open_with_entropy`, which the node
+  uses, starts a fresh log at a random sequence in [2^24, 2^31) and persists
+  it before anything else. A member whose journal is lost -- a replaced
+  device, a reflashed card -- would otherwise seal its next frames under
+  nonces its earlier life used, with the same group key and author index:
+  keystream reuse, and the Poly1305 key with it. The ceiling keeps every
+  sequence under the 32-bit round label. Residual risk ~2^-31 per frame per
+  pair of lives; binding the group key to the mission epoch (provisioning,
+  below) is the complete answer.
+- **Replay windows are seeded from the journal at start**: every witnessed
+  vote and every own frame the journal holds is marked seen, so a restart does
+  not reopen the window for them. Frames the journal does not hold (triggers,
+  requests) can be replayed once per restart at the cost of one signature
+  check; the state machine's one-vote-per-member rule stands regardless.
+- **Adversary modes live behind the `harness` cargo feature**, off by
+  default. A production build started with `--adversary` refuses to run. The
+  container harness builds with the feature on.
+- **CI actions are pinned by commit**, and the journal file is created 0600.
+
+Left to the product, not the protocol: key and manifest provisioning
+(constants in the harness binary today), group-key rotation and member
+exclusion (evidence is kept, nothing acts on it), and a per-sender rate before
+signature verification. The threat model ranks them.

@@ -261,6 +261,11 @@ impl RNodeLink {
             command::FW_VERSION => {
                 if let [major, minor, ..] = payload {
                     self.firmware = Some((*major, *minor));
+                    // Logged so an operator can pin what firmware the fleet
+                    // runs; the device is in the trusted computing base.
+                    self.note(format!(
+                        "\"event\":\"rnode_firmware\",\"major\":{major},\"minor\":{minor}"
+                    ));
                 }
             }
             command::RADIO_STATE => {

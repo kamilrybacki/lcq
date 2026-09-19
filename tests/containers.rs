@@ -103,7 +103,15 @@ fn docker_available() -> bool {
 /// the whole vessel is two files and a kernel.
 fn build_image(tag: &str) -> Result<(), String> {
     let built = Command::new("cargo")
-        .args(["build", "--release", "--bins", "--target", TARGET])
+        .args([
+            "build",
+            "--release",
+            "--bins",
+            "--features",
+            "harness",
+            "--target",
+            TARGET,
+        ])
         .status()
         .map_err(|e| e.to_string())?;
     if !built.success() {

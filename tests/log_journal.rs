@@ -485,3 +485,39 @@ fn compaction_keeps_witnessed_votes() {
             .any(|(a, f)| a == "n7" && f == b"seven")
     );
 }
+
+#[test]
+fn a_journal_opened_with_entropy_never_starts_from_zero_and_keeps_its_start() {
+    let scratch = Scratch::new("entropy");
+    let first_path = scratch.file("first.log");
+    let second_path = scratch.file("second.log");
+    let (first_start, second_start) = {
+        let first = LogJournal::open_with_entropy(&first_path).expect("opens");
+        let second = LogJournal::open_with_entropy(&second_path).expect("opens");
+        (first.next_sequence(), second.next_sequence())
+    };
+    for start in [first_start, second_start] {
+        assert!(
+            start >= 1 << 24,
+            "far from the sequences an earlier life used: {start}"
+        );
+        assert!(
+            start < 1 << 31,
+            "leaves room under the 32-bit round label: {start}"
+        );
+    }
+    assert_ne!(
+        first_start, second_start,
+        "two fresh journals must not agree by chance"
+    );
+
+    // The start is durable: a reopen counts on from it, with or without entropy.
+    let reserved = {
+        let mut reopened = LogJournal::open_with_entropy(&first_path).expect("reopens");
+        assert_eq!(reopened.next_sequence(), first_start);
+        reopened.reserve_sequence().expect("reservation is durable")
+    };
+    assert_eq!(reserved, first_start);
+    let plain = open(&first_path);
+    assert_eq!(plain.next_sequence(), first_start + 1);
+}

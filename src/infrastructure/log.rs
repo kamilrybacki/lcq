@@ -29,7 +29,9 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use std::collections::hash_map::RandomState;
 use std::fs::{File, OpenOptions};
+use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -187,12 +189,16 @@ impl LogJournal {
     /// node must not proceed: it has no idea what it already decided.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OpenError> {
         let path = path.as_ref().to_path_buf();
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        // Nobody else on the host needs to read a member's journal. It holds
+        // ciphertext, not keys, but the vote lock is the member's alone.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
 
         // The file may have just been created, and a new file's own existence is
         // only durable once its directory entry is flushed.
@@ -220,6 +226,46 @@ impl LogJournal {
             bytes_on_disk,
             last_io_error: None,
         })
+    }
+
+    /// Open a journal whose sequences feed nonces on the air.
+    ///
+    /// A fresh log would count from zero, and a member whose journal was lost
+    /// -- a replaced device, a reflashed card -- would seal its next frames
+    /// under nonces it already used in its earlier life, with the same group
+    /// key and author index: keystream reuse, and the Poly1305 key with it. The
+    /// durable counter is the defence while the journal lives; this is the
+    /// defence for the day it does not. A fresh log starts at a random point
+    /// in `[2^24, 2^31)`, persisted before anything else, so two lives of one
+    /// member collide with probability about one in two billion per frame
+    /// rather than certainly. The ceiling keeps every sequence a round label
+    /// (`RoundId`, 32 bits) can carry.
+    ///
+    /// `open` alone keeps counting from zero, for tools and tests that reason
+    /// about absolute sequences; a node must use this.
+    ///
+    /// # Errors
+    ///
+    /// As [`LogJournal::open`], plus [`OpenError::Io`] if the starting point
+    /// could not be persisted.
+    pub fn open_with_entropy(path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        let mut journal = Self::open(path)?;
+        if journal.bytes_on_disk == 0 && journal.state.next_sequence == 0 {
+            let start = Self::random_start();
+            journal
+                .try_append(&Entry::Sequence { next: start })
+                .map_err(OpenError::Io)?;
+            journal.state.next_sequence = start;
+        }
+        Ok(journal)
+    }
+
+    /// A starting sequence from the operating system's entropy: at least 2^24,
+    /// below 2^31.
+    fn random_start() -> u64 {
+        const FLOOR: u64 = 1 << 24;
+        const CEILING: u64 = 1 << 31;
+        FLOOR + RandomState::new().build_hasher().finish() % (CEILING - FLOOR)
     }
 
     /// The last I/O failure, for an operator trying to work out why a node

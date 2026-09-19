@@ -121,7 +121,17 @@ enum Adversary {
 }
 
 impl Adversary {
+    /// Only a build with the `harness` feature knows these names. A production
+    /// binary started with `--adversary` refuses to run rather than quietly
+    /// running honest -- or, worse, as whatever the flag said.
     fn parse(name: Option<&str>) -> Self {
+        if !cfg!(feature = "harness") {
+            assert!(
+                name.is_none(),
+                "--adversary is a test-harness option; this build has no harness feature"
+            );
+            return Self::None;
+        }
         match name {
             Some("forge") => Self::Forge,
             Some("double-vote") => Self::DoubleVote,
@@ -153,6 +163,14 @@ fn entropy_below(bound: u64) -> u64 {
 #[allow(clippy::too_many_lines)]
 fn main() {
     let options = Options::from_args();
+    // The acknowledgement bitmap has one bit per member and no more; a fleet
+    // past it would lose acknowledgements silently, which is worse than not
+    // starting.
+    assert!(
+        options.fleet >= 1 && options.fleet <= Heard::CAPACITY,
+        "--fleet must be between 1 and {}",
+        Heard::CAPACITY
+    );
     let epoch = Timestamp::from_secs(options.epoch);
     // Provisional, for the log lines before a round exists. The real one starts
     // when the trigger does: a case begins when the frame that opens it goes on
@@ -171,7 +189,9 @@ fn main() {
 
     // Recovering the journal IS the restart path. Anything already committed is
     // read back here, including a vote lock that must not be taken twice.
-    let mut journal = LogJournal::open(&options.journal).expect("journal opens");
+    // With entropy: a journal that starts counting from zero after being
+    // lost would reuse nonces (D22).
+    let mut journal = LogJournal::open_with_entropy(&options.journal).expect("journal opens");
     let recovered_vote = journal.has_voted(&subject, &member_id(options.index));
     let mut case = Case::open(subject.clone());
 
@@ -280,6 +300,23 @@ fn main() {
     // after the signature verifies: the cleartext header is a claim, and anyone
     // holding the group key could otherwise poison the window with forgeries.
     let mut windows: Vec<ReplayWindow> = vec![ReplayWindow::new(); options.fleet];
+    // A restart must not reopen the replay window: everything the journal
+    // holds -- votes witnessed, our own frames -- was seen, and is seen still.
+    for (author, bytes) in journal.witnessed() {
+        if let Some(index) = member_index(author)
+            && let Ok((_, sequence)) = peek_frame_header(bytes)
+            && let Some(window) = windows.get_mut(index)
+        {
+            window.mark(sequence);
+        }
+    }
+    for frame in journal.pending() {
+        if let Ok((_, sequence)) = peek_frame_header(frame.bytes())
+            && let Some(window) = windows.get_mut(options.index)
+        {
+            window.mark(sequence);
+        }
+    }
     let mut attempts = [0usize; 3];
 
     let stage_window = options.stage_window_s();
@@ -339,10 +376,12 @@ fn main() {
             // The round is named by this very frame: who sends it, under which
             // sequence. Read before the reservation so the two agree, and
             // checked by every receiver against the frame's own header.
-            round = RoundId::new(
-                u16::try_from(options.index).unwrap_or(u16::MAX),
-                u32::try_from(journal.next_sequence()).unwrap_or(u32::MAX),
-            );
+            // The label carries 32 bits of sequence; the journal starts below
+            // 2^31 (D22) and a member never sends 2^31 frames, so a sequence
+            // that does not fit is a broken invariant, not a case to truncate.
+            let label = u32::try_from(journal.next_sequence())
+                .expect("a sequence past the round label: rotate the epoch before 2^32");
+            round = RoundId::new(u16::try_from(options.index).unwrap_or(u16::MAX), label);
             let bytes = build_trigger(
                 &subject,
                 &keys[options.index],

@@ -120,6 +120,11 @@ impl RadioQueue {
     /// [`QueueError::Full`] at either cap, and [`QueueError::Duplicate`] if this
     /// frame was already queued or recently sent — store-and-forward means the
     /// same frame arrives from several neighbours.
+    ///
+    /// The frame's `sequence` is its identity here, and the queue does not know
+    /// whose sequence it is: a caller holding frames from several members must
+    /// hand in a composite (the node uses `author << 48 | sequence`), or two
+    /// members' first frames would look like one.
     pub fn offer(&mut self, frame: OutgoingFrame, priority: Priority) -> Result<(), QueueError> {
         if self.seen.contains(&frame.sequence()) {
             return Err(QueueError::Duplicate);
