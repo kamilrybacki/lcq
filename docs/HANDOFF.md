@@ -268,16 +268,67 @@ On a repair request the middle of a line carries each end's vote to the other,
 unchanged, in its own slot. Geometry test tally went from [4, 5, 5, 5, 4] to
 [5, 5, 5, 5, 5]. This is the range-by-relaying D2 chose over SF12, working.
 
+### Radio seam and virtual SX1262 (D16)
+
+The node talks to a radio through one seam, `lcq::application::Radio`:
+`transmit(bytes)`, and `poll()` for received frames with RSSI and SNR, CRC
+failures and adapter diagnostics. `HubRadio` is the emulator socket as before.
+`Sx126xRadio` is a virtual SX1262: a behavioural model of the chip with a clock
+(`infrastructure::sx126x`), driven by the *unmodified* `lora-phy` `Sx126x`
+driver over a virtual SPI bus and virtual BUSY/DIO1/reset lines, attached to the
+same hub. The hub now hands each receiver a `Delivery` -- RSSI, SNR, airtime,
+CRC flag -- and a collided frame arrives as a CRC failure with garbled bytes
+rather than as silence. `lcq-node --radio sx1262` selects the virtual chip;
+`LCQ_RADIO=sx1262` points the whole container suite at it.
+
+Measured: the baseline fleet endorses 5/5 on both radios, and the virtual chips
+missed no frames -- the slot schedule keeps members out of each other's
+airtime, so half-duplex deafness had nothing to bite. Nine bench tests
+(`tests/sx126x.rs`) drive the real driver against the chip model with channels
+for a medium: bytes and airtime of a transmission, reception with the signal
+report decoded as the driver decodes it, deaf in standby and during TX, a late
+listener misses, a collided frame raises `RxDone` with `CrcErr`, sleep and wake.
+Full container suite on the virtual chip: 20 of 20 tests in 638 s, no container left behind, geometry tally still [5, 5, 5, 5, 5] with relaying through the virtual chips.
+
+One thing the driver does that is worth knowing: `lora-phy` hands a CRC-failed
+frame up as a reception -- the payload is whatever arrived. The protocol's seal
+is what rejects it. Pinned by a test so a change upstream is noticed.
+
+Found on the way: the replay-adversary container test compared drops with
+replays *sent*, and on that channel most replays collide and reach nobody, so
+the assertion sat at its own expected value (26 replays, 27 drops in one run,
+24 in the next). The emulator now names the author and sequence of every frame
+it delivers, and the test compares drops with replays *delivered* -- the
+property it always meant: no receiver verifies a frame it already had.
+
 ### What to pick up next
 
-1. **Radio seam and virtual SX1262** (D16, `RESEARCH-lora-module-emulation.md`)
-   — in progress. The node's hub socket becomes one adapter behind a `Radio`
-   seam; a timed SX126x chip model under the unmodified `lora-phy` driver is
-   the second; the container suite has to pass on both. The hub → node frame
-   grows RSSI/SNR/airtime metadata, and collided frames arrive as CRC errors.
-2. **Hardware qualification** (roadmap M8) once the virtual module passes: two
-   SX1262 boards first — RNode firmware over USB needs no firmware work — then
-   five. Same node binary; only the SPI/GPIO adapter changes.
+1. **Hardware qualification** (roadmap M8): the virtual module passes the
+   whole suite (D16), so the next radio is a real one. Two SX1262 boards first
+   — RNode firmware over USB needs no firmware work, and `tulle` already
+   speaks its KISS protocol in Rust — then five. Same node binary; for an SPI
+   HAT only `VirtualSpi`/`VirtualIv` are swapped for `linux-embedded-hal`.
+2. **Chip model fidelity**, from Hermes's review of D16 (Discord, 2026-09-19
+   15:35 UTC) and D16's own list. Ready for a first hardware pass of the
+   driver and state machine; not ready for claims about capture or collision
+   behaviour; CAD not ready as a protocol mechanism. Before hardware:
+   freeze one versioned PHY profile (region, SF, BW, CR, preamble, header
+   mode, CRC, sync word, IQ, LDRO, power, RX timeout, CAD parameters) and
+   compare emulator and boards on it, never on defaults; make the medium
+   distinguish no-preamble-lock, locked-but-corrupted and decoded, and carry
+   `HeaderErr` next to `CrcErr` in telemetry (neither may reach the parser);
+   make capture time-aware -- acquisition window against payload lock, the
+   LoRaSim rule as the start -- with its parameters in the profile, not a
+   global 6 dB; derive the late-listener threshold from the configured
+   preamble rather than a constant, with boundary tests at 1, 2 and 3 symbols
+   and two preamble lengths; give CAD a deliberately simple, profiled state
+   machine (`CadDone` with and without `CadDetected`, weak, no match) but
+   never "any frame in flight means detected"; and expose the `chip_missed`
+   counters as a metric the suite watches. On hardware: measure `SetTx` to
+   `TxDone`, `SetRx` to first catchable preamble, `RxDone`/`CrcErr` to FIFO
+   read, CAD latency, sleep/wake recovery and half-duplex overlap -- wired
+   through attenuators, a combiner and a shielded box before any antenna.
+   Do not grow the emulator further before those measurements exist.
 3. **Short case reference** (D4) — 23 % off every frame, no security traded.
 4. `RadioQueue` is what the node carries other members' votes with, on request
    (D15). The distress class exists and nothing yet uses it; the first

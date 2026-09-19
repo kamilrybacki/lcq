@@ -43,9 +43,9 @@ pub use medium::{
     duty_cycle_ok, receive,
 };
 pub use phy::{
-    ANTENNA_GAIN_DBI, CARRIER_HZ, Link, MAST_HEIGHT_M, MAX_FADE_DB, MIN_FADE_DB, RicianFading,
-    SENSITIVITY_DBM, TX_POWER_DBM, breakpoint_m, max_range_m, path_loss_db, radio_horizon_m,
-    rssi_dbm, sensitivity_dbm_at,
+    ANTENNA_GAIN_DBI, CARRIER_HZ, Link, MAST_HEIGHT_M, MAX_FADE_DB, MIN_FADE_DB, NOISE_FLOOR_DBM,
+    RicianFading, SENSITIVITY_DBM, TX_POWER_DBM, breakpoint_m, max_range_m, path_loss_db,
+    radio_horizon_m, rssi_dbm, sensitivity_dbm_at, snr_db,
 };
 pub use protocol::{Deliberation, DeliberationReport, SlotAnchor, StageReport};
 pub use rng::Rng;

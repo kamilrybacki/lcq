@@ -187,6 +187,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "document-features"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
+dependencies = [
+ "litrs",
+]
+
+[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -208,6 +217,27 @@ dependencies = [
  "sha2",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "embassy-futures"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
+
+[[package]]
+name = "embedded-hal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+
+[[package]]
+name = "embedded-hal-async"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c4c685bbef7fe13c3c6dd4da26841ed3980ef33e841cddfa15ce8a8fb3f1884"
+dependencies = [
+ "embedded-hal",
 ]
 
 [[package]]
@@ -310,6 +340,10 @@ dependencies = [
  "blake2",
  "chacha20poly1305",
  "ed25519-dalek",
+ "embedded-hal",
+ "embedded-hal-async",
+ "lora-modulation",
+ "lora-phy",
  "postcard",
  "proptest",
  "rand_core 0.6.4",
@@ -327,6 +361,30 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "litrs"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "lora-modulation"
+version = "0.1.5"
+source = "git+https://github.com/lora-rs/lora-rs#8a7851f775596cd2b1c3075f6c02836cd3d7c6e8"
+
+[[package]]
+name = "lora-phy"
+version = "3.0.2-alpha"
+source = "git+https://github.com/lora-rs/lora-rs#8a7851f775596cd2b1c3075f6c02836cd3d7c6e8"
+dependencies = [
+ "document-features",
+ "embassy-futures",
+ "embedded-hal",
+ "embedded-hal-async",
+ "lora-modulation",
+ "num-traits",
+]
 
 [[package]]
 name = "num-traits"

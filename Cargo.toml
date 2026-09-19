@@ -12,6 +12,10 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 blake2 = { version = "0.10", default-features = false }
+lora-phy = { git = "https://github.com/lora-rs/lora-rs", version = "3.0.2-alpha" }
+lora-modulation = { git = "https://github.com/lora-rs/lora-rs", version = "0.1.5" }
+embedded-hal = "1"
+embedded-hal-async = "1"
 
 [dev-dependencies]
 proptest = "1"

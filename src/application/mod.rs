@@ -7,7 +7,9 @@
 mod budget;
 mod journal;
 mod queue;
+mod radio;
 
 pub use budget::{AirtimeBudget, DUTY_CYCLE_BUDGET_MS, DUTY_CYCLE_WINDOW_MS, duty_cycle_ok};
 pub use journal::{Journal, JournalError, JournalSnapshot, OutgoingFrame};
 pub use queue::{Priority, QueueError, RadioQueue};
+pub use radio::{PhyProfile, Radio, RadioError, RadioEvent, Received};

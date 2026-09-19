@@ -1064,3 +1064,34 @@ command set inside `lora-rs/lora-rs`.
   `radio-sx126x`-style blocking drivers behind the *same* seam, not a new seam.
 - A chosen module outside the SX126x/SX127x families (LR11xx, SX128x): the
   chip model is per family; the seam is not.
+
+### Implemented 2026-09-19
+
+Built: `application::radio` (the seam), `infrastructure::hub` (the delivery
+format and the socket both adapters share), `infrastructure::hub_radio`,
+`infrastructure::sx126x` (`chip` model, `bus`, `executor`, `radio`), the
+`--radio` option on `lcq-node`, `LCQ_RADIO` in the container harness, a bench
+suite in `tests/sx126x.rs`, and the hub delivering collided frames as CRC
+failures. Dependencies added: `lora-phy` and `lora-modulation` from
+`lora-rs/lora-rs` (git, MIT), `embedded-hal`, `embedded-hal-async`.
+
+What the chip model asserts, and what it leaves out:
+
+- Opcodes are the datasheet's (DS.SX1261-2 table 11-1), not the driver's enum,
+  so the model does not lean on the crate it exercises. Read-only commands
+  answer with the status byte first, as the chip does; buffer and register
+  reads answer without one, as the driver reads them past a NOP.
+- Time: TX lasts `lora-modulation`'s time on air for the chip's own modulation
+  and packet parameters -- the same AN1200.13 formula `sim::channel::airtime_ms`
+  uses, so hub and chip agree on when a frame ends. Timed receives run in
+  15.625 µs ticks. Both are divided by the test's time scale.
+- Deafness: a frame is received only if the chip was in receive mode from no
+  later than two symbols after the frame started (floor 5 ms wall time, for
+  tests that compress time a hundredfold). TX, standby and sleep hear nothing,
+  and say so as `chip_missed` notes in the node's log.
+- Not modelled: capture timing (still the hub's power-only rule), CAD against
+  real channel activity (the hub does not yet expose frames in flight, so CAD
+  answers "clear"), register semantics, BUSY beyond a fixed 100 µs.
+
+Measured: baseline fleet 5/5 on both radios, no frame missed by any chip; nine
+bench tests under the real driver; 20 of 20 tests in 638 s, no container left behind, geometry tally still [5, 5, 5, 5, 5] with relaying through the virtual chips.

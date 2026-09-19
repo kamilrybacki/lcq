@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lcq::sim::{Link, SENSITIVITY_DBM, TX_POWER_DBM, airtime_ms, capture_wins, rssi_dbm};
+use lcq::infrastructure::hub::{Delivery, write_delivery};
+use lcq::sim::{Link, SENSITIVITY_DBM, TX_POWER_DBM, airtime_ms, capture_wins, rssi_dbm, snr_db};
+use lcq::wire::peek_frame_header;
 
 /// One frame arriving from a node.
 struct Incoming {
@@ -39,6 +41,38 @@ struct InFlight {
     /// Settled: every receiver has been told, or not, and only the overlap
     /// record remains.
     done: bool,
+}
+
+/// A collided frame reaches its receiver as bytes that are not the sender's.
+/// XOR with a constant is noise enough for frames that are sealed: nothing
+/// recoverable arrives, and the CRC flag says why.
+const GARBLE: u8 = 0xA5;
+
+/// What one receiver gets: the frame as sent, or its wreck.
+fn delivery(frame: &InFlight, power: f64, intact: bool) -> Delivery {
+    #[allow(clippy::cast_possible_truncation)]
+    let rssi_dbm = power.round().clamp(-300.0, 100.0) as i16;
+    #[allow(clippy::cast_possible_truncation)]
+    let snr = snr_db(power).round() as i8;
+    let airtime_ms = u32::try_from(
+        frame
+            .ends_at
+            .saturating_duration_since(frame.starts_at)
+            .as_millis(),
+    )
+    .unwrap_or(u32::MAX);
+    let bytes = if intact {
+        frame.bytes.clone()
+    } else {
+        frame.bytes.iter().map(|byte| byte ^ GARBLE).collect()
+    };
+    Delivery {
+        bytes,
+        rssi_dbm,
+        snr_db: snr,
+        airtime_ms,
+        crc_ok: intact,
+    }
 }
 
 /// Received power when no geometry is configured: the same for every pair, so
@@ -217,6 +251,11 @@ fn settle(
                 "{{\"event\":\"collision\",\"a\":{},\"b\":{},\"at\":{target}}}",
                 frame.from, other.from
             ));
+            // The receiver heard *something*: a real chip raises RxDone with
+            // a CRC failure, and a node may count that as evidence of a voice.
+            if let Some(stream) = guard.get_mut(&target) {
+                let _ = write_delivery(stream, &delivery(frame, power, false));
+            }
             continue;
         }
         if options.loss > 0.0 && next_f64(seed) < options.loss {
@@ -226,18 +265,21 @@ fn settle(
             ));
             continue;
         }
-        if let Some(stream) = guard.get_mut(&target) {
-            let length = u32::try_from(frame.bytes.len()).unwrap_or(0).to_le_bytes();
-            if stream.write_all(&length).is_err() || stream.write_all(&frame.bytes).is_err() {
-                continue;
-            }
-            let _ = stream.flush();
+        if let Some(stream) = guard.get_mut(&target)
+            && write_delivery(stream, &delivery(frame, power, true)).is_ok()
+        {
             delivered_to += 1;
         }
     }
     if delivered_to > 0 {
+        // The cleartext header names the author and sequence, so whoever
+        // reads this log can tell a member's own frame from one it repeated.
+        let header = peek_frame_header(&frame.bytes).ok();
+        let author = header.map_or_else(|| "null".to_string(), |(author, _)| author.to_string());
+        let sequence =
+            header.map_or_else(|| "null".to_string(), |(_, sequence)| sequence.to_string());
         options.log(&format!(
-            "{{\"event\":\"delivered\",\"from\":{},\"bytes\":{},\"to\":{delivered_to}}}",
+            "{{\"event\":\"delivered\",\"from\":{},\"author\":{author},\"sequence\":{sequence},\"bytes\":{},\"to\":{delivered_to}}}",
             frame.from,
             frame.bytes.len()
         ));

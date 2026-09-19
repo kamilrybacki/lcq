@@ -23,6 +23,21 @@ pub const ANTENNA_GAIN_DBI: f64 = 2.0;
 /// Transmit power, in dBm. The 14 dBm ERP ceiling of EU 868 MHz sub-band g1.
 pub const TX_POWER_DBM: f64 = 14.0;
 
+/// Receiver noise floor in dBm at 125 kHz: thermal noise at -174 dBm/Hz over
+/// the bandwidth (-123 dBm) plus a 6 dB noise figure. The SNR a frame is
+/// reported with is its received power above this; at the SF10 sensitivity of
+/// -132 dBm that is -15 dB, the demodulation limit the datasheet gives for
+/// SF10, so the two figures agree.
+pub const NOISE_FLOOR_DBM: f64 = -117.0;
+
+/// Signal-to-noise ratio in dB for a received power, as a chip would report
+/// it. The `SX126x` saturates a little above +10 dB; -30 dB is far below anything
+/// it could have demodulated.
+#[must_use]
+pub fn snr_db(rssi_dbm: f64) -> f64 {
+    (rssi_dbm - NOISE_FLOOR_DBM).clamp(-30.0, 12.0)
+}
+
 /// Receiver sensitivity, in dBm, at the default spreading factor.
 ///
 /// Tied to the same profile as [`crate::sim::airtime_ms`]: both describe SF10 /

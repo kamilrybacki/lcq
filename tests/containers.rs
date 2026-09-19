@@ -13,6 +13,7 @@
 //! quietly -- a container test that silently becomes a no-op is worse than one
 //! that fails.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -185,6 +186,31 @@ impl Sea {
         name
     }
 
+    /// How many receivers got the frame the member at `from` put on the air
+    /// most often: the sum of `to` over that member's deliveries of one
+    /// (author, sequence). A member's own frames go out once each and a relay
+    /// a couple of times; a replayed frame goes out until the airtime budget
+    /// says no, so the most repeated one is the replay.
+    fn most_repeated_delivery(hub: &str, from: usize) -> usize {
+        let logs = Command::new("docker")
+            .args(["logs", hub])
+            .output()
+            .map_or_else(
+                |_| String::new(),
+                |o| String::from_utf8_lossy(&o.stdout).into_owned(),
+            );
+        let mine = format!("\"from\":{from},");
+        let mut per_frame: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        for line in logs
+            .lines()
+            .filter(|l| l.contains("\"delivered\"") && l.contains(&mine))
+        {
+            let key = (field(line, "\"author\":"), field(line, "\"sequence\":"));
+            *per_frame.entry(key).or_default() += field(line, "\"to\":");
+        }
+        per_frame.values().copied().max().unwrap_or(0)
+    }
+
     /// How many frames the emulator destroyed by overlap so far.
     fn collisions(hub: &str) -> usize {
         Command::new("docker")
@@ -252,6 +278,15 @@ impl Sea {
             command.push("8000".into());
         }
         command.extend(extra.iter().map(ToString::to_string));
+        // The whole suite can be pointed at another radio adapter without
+        // touching a test: LCQ_RADIO=sx1262 puts every vessel on the virtual
+        // SX1262 under the real driver (D16).
+        if let Ok(radio) = std::env::var("LCQ_RADIO")
+            && !extra.contains(&"--radio")
+        {
+            command.push("--radio".into());
+            command.push(radio);
+        }
         let mount = format!("{}:/journal", journal_dir.display());
         // As the invoking user, not root. A vessel's node has no business
         // running as root, and it also means the journal it leaves behind is
@@ -1369,10 +1404,25 @@ fn adversary_replayed_frames_are_dropped_before_verification() {
     ));
     note_anomalies(&ships);
 
+    // A replay that collided at every receiver reached nobody and can be
+    // dropped by nobody, and on a channel this busy most of them collide:
+    // comparing drops with replays *sent* put the assertion at its own
+    // expected value, a coin flip. Compare with replays *delivered* instead.
+    // The emulator names the author and sequence of every frame it hands
+    // over, and the adversary repeats one captured frame, so the most
+    // repeated (author, sequence) from its socket is the replay.
+    let delivered = Sea::most_repeated_delivery(&hub, 4);
+    note(&format!(
+        "  dostarczonych powtorzen wedlug emulatora: {delivered}"
+    ));
     assert!(replayed >= 1, "powtarzacz nic nie powtorzyl");
     assert!(
-        dropped >= replayed,
-        "kazde powtorzenie musi zostac odrzucone u kazdego, kto je slyszal"
+        dropped >= 1,
+        "zadne powtorzenie nie dotarlo do nikogo, wiec nic nie zostalo sprawdzone"
+    );
+    assert!(
+        dropped >= delivered,
+        "kazde dostarczone powtorzenie musi zostac odrzucone: {delivered} dostarczonych, {dropped} odrzuconych"
     );
     for (index, result) in finals.iter().enumerate() {
         assert!(
@@ -1685,5 +1735,68 @@ fn geometry_puts_the_far_ends_of_a_line_out_of_each_others_hearing() {
             result.supporters, fleet,
             "statek {index}: przekaz przez srodek uzupelnia tally konca linii"
         );
+    }
+}
+
+#[test]
+fn a_fleet_on_virtual_sx1262_radios_reaches_one_verdict() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    let fleet = 5;
+    let mut sea = Sea::new("sx1262").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let ships = put_to_sea_with(&mut sea, fleet, &hub, &["--radio", "sx1262"]);
+    note(&format!(
+        "wyplynelo {fleet} jednostek na wirtualnych SX1262, kanal: {hub}"
+    ));
+
+    let finals: Vec<Final> = ships
+        .iter()
+        .map(|ship| {
+            ship.await_final(Duration::from_mins(2))
+                .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
+        })
+        .collect();
+
+    for (index, result) in finals.iter().enumerate() {
+        note(&format!(
+            "  statek {index}: poparc {} / prog {} -> {} (ramki pominiete przez chip: {})",
+            result.supporters,
+            result.threshold,
+            if result.endorsed {
+                "ZATWIERDZONE"
+            } else {
+                "zablokowane"
+            },
+            count_in_log(&ships[index], "\"chip_missed\"")
+        ));
+    }
+    note_anomalies(&ships);
+
+    // The real driver brought every chip up and nothing it did failed.
+    for ship in &ships {
+        assert_eq!(
+            count_in_log(ship, "\"chip_up\""),
+            1,
+            "statek {} nie podniosl radia",
+            ship.index
+        );
+        assert_eq!(
+            count_in_log(ship, "_failed\""),
+            0,
+            "statek {}: sterownik zglosil blad",
+            ship.index
+        );
+    }
+    for (index, result) in finals.iter().enumerate() {
+        assert_eq!(result.supporters, fleet, "statek {index} policzyl inaczej");
+        assert!(result.endorsed, "statek {index} nie zatwierdzil");
+    }
+    for ship in &ships {
+        assert!(ship.voted(), "statek {} nie zostawil blokady", ship.index);
+        assert_eq!(ship.locks(), 1);
     }
 }

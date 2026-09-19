@@ -16,9 +16,13 @@ compromised.
 
 ## Status
 
-**M1 only: the quorum-policy calculator.** Nothing is authenticated, nothing is
-transmitted, nothing is stored. This is deliberately the smallest reviewable
-piece — the arithmetic that everything later depends on.
+**Implemented through D16.** Signed and sealed frames, a durable append-only
+journal, slotted access anchored on the trigger, receiver-driven repair,
+relaying, six adversary modes, and a node that runs as a real process against
+a channel emulator -- or against a virtual SX1262 under the real `lora-phy`
+driver. `docs/HANDOFF.md` has the state and the measurements; `docs/DECISIONS.md`
+has what a later session must not silently reverse. The quorum arithmetic below
+is where it all started and is unchanged.
 
 ## Usage
 
@@ -66,10 +70,29 @@ Integer arithmetic throughout: no rounding decides a safety threshold.
   heavy member from holding the weight threshold hostage. That is a property of
   the design, not a defect in the code.
 
+## Running a fleet
+
+One channel emulator, then one process per member. Members hold the hub's
+address; the emulator models airtime, reach, collisions and loss.
+
+```sh
+cargo run --release --bin lcq-hub -- --bind 127.0.0.1 --port 9000 --fleet 5 --scale 100
+cargo run --release --bin lcq-node -- --index 1 --fleet 5 --hub 127.0.0.1:9000 --scale 100 --slots --journal ship1.log
+# ... members 2 to 4 likewise, then the one that opens the round:
+cargo run --release --bin lcq-node -- --index 0 --fleet 5 --hub 127.0.0.1:9000 --scale 100 --slots --journal ship0.log --trigger
+```
+
+`--radio sx1262` puts a member on the virtual SX1262: the unmodified `lora-phy`
+driver, a behavioural chip model with a clock, the same hub as its medium (D16).
+The container suite (`tests/containers.rs`) does all of this in Docker, one
+container per vessel, and `LCQ_RADIO=sx1262` runs the whole suite on the
+virtual chips.
+
 ## Development
 
 ```sh
-cargo test
+cargo test                                   # everything, containers included when Docker is there
+LCQ_RADIO=sx1262 cargo test --test containers  # the fleet on virtual SX1262 radios
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

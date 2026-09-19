@@ -13,14 +13,14 @@
 //! Usage: `lcq-node --index 0 --fleet 10 --hub 127.0.0.1:PORT --journal PATH
 //! [--scale 100] [--offset 0] [--epoch 1000000] [--slots] [--guard-ms 200]`
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lcq::application::{AirtimeBudget, Journal, OutgoingFrame, Priority, RadioQueue};
+use lcq::application::{
+    AirtimeBudget, Journal, OutgoingFrame, PhyProfile, Priority, Radio, RadioEvent, RadioQueue,
+};
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
@@ -31,7 +31,8 @@ use lcq::domain::contracts::{
 use lcq::domain::quorum::{Policy, evaluate};
 use lcq::domain::state::{Case, TransitionError};
 use lcq::domain::time::{Clock, Timestamp};
-use lcq::infrastructure::{LogJournal, ScaledClock};
+use lcq::infrastructure::sx126x::Sx126xRadio;
+use lcq::infrastructure::{HubRadio, LogJournal, ScaledClock};
 use lcq::sim::airtime_ms;
 use lcq::wire::{
     CompactEnvelope, GroupKey, Heard, MAX_FRAME_BYTES, RoundId, SigningKey, VerifyingKey,
@@ -175,8 +176,9 @@ fn main() {
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"start\",\"index\":{},\"recovered_vote\":{recovered_vote},\"pending\":{}}}",
+            "{{\"event\":\"start\",\"index\":{},\"radio\":\"{}\",\"recovered_vote\":{recovered_vote},\"pending\":{}}}",
             options.index,
+            options.radio.name(),
             journal.pending().count()
         ),
     );
@@ -185,7 +187,7 @@ fn main() {
     // The legal airtime this node has left this hour. Every transmission goes
     // through it; a refused frame is logged and not sent.
     let mut budget = AirtimeBudget::with_prior(options.prior_airtime_ms);
-    let mut link = Link::connect(&options.hub, options.index);
+    let mut radio = open_radio(&options);
     let mut sent = [false; 3];
     let mut closed = false;
     let mut began: Option<Instant> = None;
@@ -353,7 +355,14 @@ fn main() {
                 // run a whole airtime ahead of everybody else -- which lands its
                 // slot k on top of their slot k-1.
                 let air = Duration::from_millis(clock.wall_ms(airtime_ms(bytes.len())));
-                transmit(&mut link, &mut budget, &bytes, started, &options, &clock);
+                transmit(
+                    radio.as_mut(),
+                    &mut budget,
+                    &bytes,
+                    started,
+                    &options,
+                    &clock,
+                );
                 began = Some(Instant::now() + air);
                 clock = ScaledClock::new(epoch, options.scale, options.offset);
                 report(
@@ -373,7 +382,7 @@ fn main() {
         if began.is_none() {
             // Nothing to schedule against yet: the only thing worth doing is
             // listening for the frame that opens the round.
-            if let Some(frame) = link.poll()
+            if let Some(frame) = receive(radio.as_mut(), &options, &clock)
                 && !is_replay(&frame, &last_seen)
             {
                 if let Some((opened, opener, sequence)) =
@@ -475,7 +484,14 @@ fn main() {
                 &options,
                 second,
             ) {
-                transmit(&mut link, &mut budget, &bytes, started, &options, &clock);
+                transmit(
+                    radio.as_mut(),
+                    &mut budget,
+                    &bytes,
+                    started,
+                    &options,
+                    &clock,
+                );
                 report(&options, &clock, "{\"event\":\"equivocated\"}");
             }
         }
@@ -496,7 +512,14 @@ fn main() {
                             ^ u8::try_from(i % 256).unwrap_or(0)
                     })
                     .collect();
-                transmit(&mut link, &mut budget, &junk, started, &options, &clock);
+                transmit(
+                    radio.as_mut(),
+                    &mut budget,
+                    &junk,
+                    started,
+                    &options,
+                    &clock,
+                );
                 *next += Duration::from_millis(options.retry_gap_ms(&clock));
                 report(
                     &options,
@@ -514,7 +537,7 @@ fn main() {
             let first = anchor + Duration::from_millis(clock.wall_ms(starts[2] * 1_000));
             let next = replay_next.get_or_insert(first);
             if Instant::now() >= *next {
-                transmit(&mut link, &mut budget, old, started, &options, &clock);
+                transmit(radio.as_mut(), &mut budget, old, started, &options, &clock);
                 // Not half a window: that divides the schedule and lands on the
                 // same two slots every window, which is jamming, and the jam
                 // test covers jamming. This period drifts across the slots.
@@ -629,8 +652,14 @@ fn main() {
                 Ok(bytes) => {
                     // Spent whether or not it went out: a refused frame does not buy a
                     // second try at the same slot.
-                    let went_out =
-                        transmit(&mut link, &mut budget, &bytes, started, &options, &clock);
+                    let went_out = transmit(
+                        radio.as_mut(),
+                        &mut budget,
+                        &bytes,
+                        started,
+                        &options,
+                        &clock,
+                    );
                     attempts[index] += 1;
                     // Our own sequence goes in the window as well. Without it a
                     // replay of our own earlier frame passes the cheap check
@@ -730,7 +759,14 @@ fn main() {
                     round,
                 ) {
                     Ok(bytes) => {
-                        transmit(&mut link, &mut budget, &bytes, started, &options, &clock);
+                        transmit(
+                            radio.as_mut(),
+                            &mut budget,
+                            &bytes,
+                            started,
+                            &options,
+                            &clock,
+                        );
                         let list: Vec<String> = missing.iter().map(ToString::to_string).collect();
                         report(
                             &options,
@@ -757,13 +793,20 @@ fn main() {
             if owe_resend {
                 owe_resend = false;
                 if let Some(again) = journal.pending().next().map(|f| f.bytes().to_vec()) {
-                    transmit(&mut link, &mut budget, &again, started, &options, &clock);
+                    transmit(
+                        radio.as_mut(),
+                        &mut budget,
+                        &again,
+                        started,
+                        &options,
+                        &clock,
+                    );
                     report(&options, &clock, "{\"event\":\"repaired\"}");
                 }
             } else if let Some(carried) = forwards.take_next() {
                 let author = carried.sequence() >> 48;
                 if transmit(
-                    &mut link,
+                    radio.as_mut(),
                     &mut budget,
                     carried.bytes(),
                     started,
@@ -783,7 +826,7 @@ fn main() {
         // had theirs. Verifying a signature is not free, and a node that misses
         // its own slot because it was busy reading is a node that collides with
         // whoever comes next.
-        if let Some(frame) = link.poll() {
+        if let Some(frame) = receive(radio.as_mut(), &options, &clock) {
             if is_replay(&frame, &last_seen) {
                 report(&options, &clock, "{\"event\":\"replay_dropped\"}");
                 continue;
@@ -1380,7 +1423,7 @@ struct Admitted {
 /// have cost; the frame is dropped, never queued -- by the time the budget
 /// frees up the slot it was meant for is long gone.
 fn transmit(
-    link: &mut Link,
+    radio: &mut dyn Radio,
     budget: &mut AirtimeBudget,
     bytes: &[u8],
     started: Instant,
@@ -1392,8 +1435,19 @@ fn transmit(
         .unwrap_or(u64::MAX)
         .saturating_mul(u64::from(options.scale));
     if budget.transmit(now_ms, air) {
-        link.send(bytes);
-        return true;
+        // The budget is spent whether the radio takes the frame or not: a
+        // refusal is the radio's to report, not a reason to try the slot again.
+        return match radio.transmit(bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                report(
+                    options,
+                    clock,
+                    &format!("{{\"event\":\"radio_refused\",\"why\":\"{error}\"}}"),
+                );
+                false
+            }
+        };
     }
     report(
         options,
@@ -1406,57 +1460,66 @@ fn transmit(
     false
 }
 
-/// The socket to the channel emulator, with its reader on its own thread.
-struct Link {
-    stream: TcpStream,
-    inbox: Receiver<Vec<u8>>,
+/// Which adapter carries this node's frames (D16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RadioChoice {
+    /// The emulator's socket, as before D16.
+    Hub,
+    /// A virtual SX1262 under the real driver, attached to the emulator.
+    Sx1262,
 }
 
-impl Link {
-    fn connect(address: &str, index: usize) -> Self {
-        // A node may well be powered up before whatever carries its traffic is
-        // reachable, so connecting is retried rather than fatal.
-        let mut stream = None;
-        for _ in 0..300 {
-            if let Ok(socket) = TcpStream::connect(address) {
-                stream = Some(socket);
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
+impl RadioChoice {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("sx1262") => Self::Sx1262,
+            _ => Self::Hub,
         }
-        let mut stream = stream.expect("hub never became reachable");
-        stream
-            .write_all(&u16::try_from(index).unwrap_or(0).to_le_bytes())
-            .expect("handshake");
-        let _ = stream.flush();
-
-        let mut reader = stream.try_clone().expect("clone");
-        let (sender, inbox) = channel();
-        thread::spawn(move || {
-            let mut length = [0u8; 4];
-            while reader.read_exact(&mut length).is_ok() {
-                let size = u32::from_le_bytes(length) as usize;
-                if size == 0 || size > 4096 {
-                    return;
-                }
-                let mut bytes = vec![0u8; size];
-                if reader.read_exact(&mut bytes).is_err() || sender.send(bytes).is_err() {
-                    return;
-                }
-            }
-        });
-        Self { stream, inbox }
     }
 
-    fn send(&mut self, bytes: &[u8]) {
-        let length = u32::try_from(bytes.len()).unwrap_or(0).to_le_bytes();
-        let _ = self.stream.write_all(&length);
-        let _ = self.stream.write_all(bytes);
-        let _ = self.stream.flush();
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Hub => "hub",
+            Self::Sx1262 => "sx1262",
+        }
     }
+}
 
-    fn poll(&mut self) -> Option<Vec<u8>> {
-        self.inbox.try_recv().ok()
+/// Attach the radio the options ask for.
+///
+/// A node may well be powered up before whatever carries its traffic is
+/// reachable; both adapters retry for thirty seconds before this gives up.
+fn open_radio(options: &Options) -> Box<dyn Radio> {
+    match options.radio {
+        RadioChoice::Hub => Box::new(
+            HubRadio::connect(&options.hub, options.index).expect("hub never became reachable"),
+        ),
+        RadioChoice::Sx1262 => Box::new(
+            Sx126xRadio::start(
+                &options.hub,
+                options.index,
+                PhyProfile::eu868_sf10(),
+                options.scale,
+            )
+            .expect("virtual radio never came up"),
+        ),
+    }
+}
+
+/// The next intact frame, if the radio has one. Everything else the radio has
+/// to say on the way -- a CRC failure, a diagnostic -- goes to the log and is
+/// not a frame.
+fn receive(radio: &mut dyn Radio, options: &Options, clock: &impl Clock) -> Option<Vec<u8>> {
+    loop {
+        match radio.poll()? {
+            RadioEvent::Received(received) => return Some(received.bytes),
+            RadioEvent::CrcError { rssi_dbm } => report(
+                options,
+                clock,
+                &format!("{{\"event\":\"crc_error\",\"rssi\":{rssi_dbm}}}"),
+            ),
+            RadioEvent::Note(body) => report(options, clock, &format!("{{{body}}}")),
+        }
     }
 }
 
@@ -1477,6 +1540,7 @@ struct Options {
     ignore_acks: bool,
     adversary: Adversary,
     prior_airtime_ms: u64,
+    radio: RadioChoice,
 }
 
 impl Options {
@@ -1517,6 +1581,7 @@ impl Options {
             prior_airtime_ms: value("--prior-airtime-ms")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            radio: RadioChoice::parse(value("--radio").as_deref()),
         }
     }
 
