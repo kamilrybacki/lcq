@@ -1,0 +1,57 @@
+name: firmware
+
+# The bridge firmware is compiled here rather than on a workstation: the
+# esp32 Arduino core is several gigabytes. The build directory is published
+# as an artifact; the README under firmware/bridge says how to flash it.
+
+on:
+  push:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARDUINO_CLI_VERSION: 1.5.1
+  ESP32_CORE_VERSION: 3.3.12
+  FQBN: esp32:esp32:XIAO_ESP32S3
+
+jobs:
+  bridge:
+    name: bridge (XIAO ESP32-S3 + Wio-SX1262)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install arduino-cli
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | BINDIR="$HOME/.local/bin" sh -s "$ARDUINO_CLI_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install the esp32 core
+        run: |
+          arduino-cli config init --overwrite \
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@$ESP32_CORE_VERSION"
+
+      - name: Compile
+        run: |
+          arduino-cli compile --fqbn "$FQBN" --warnings all --export-binaries firmware/bridge
+          ls -la firmware/bridge/build/*/
+
+      - name: Publish the binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bridge-xiao-esp32s3
+          path: firmware/bridge/build/
+          if-no-files-found: error
