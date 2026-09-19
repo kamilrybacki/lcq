@@ -93,10 +93,16 @@ virtual chips.
 
 ## Running on hardware
 
-Two ways onto a real SX1262, behind the same seam (D21), neither yet tried on
-a board:
+Three ways onto a real SX1262, behind the same seam. The first is for the
+boards on order (D23): a Seeed XIAO ESP32-S3 + Wio-SX1262 kit running the
+bridge firmware under `firmware/bridge`, which makes the board a remote SPI
+device so the unmodified `lora-phy` driver on the host drives the chip
+directly. `docs/HARDWARE-BRINGUP.md` is the first day with them.
 
 ```sh
+# The bridge firmware on USB serial (a 1.8 V TCXO and the DC-DC converter
+# are the kit's defaults; `,tcxo=none` and `,ldo` say otherwise):
+lcq-node --index 1 --fleet 3 --slots --journal ship1.log --radio bridge:/dev/ttyACM0
 # An RNode (Heltec, LilyGO, RAK boards with RNode firmware) on USB serial:
 lcq-node --index 1 --fleet 5 --slots --journal ship1.log --radio rnode:/dev/ttyACM0
 # An SX1262 HAT on a Raspberry Pi: spidev, then the gpiochip and the BUSY,
@@ -105,8 +111,11 @@ lcq-node --index 1 --fleet 5 --slots --journal ship1.log \
   --radio spi:/dev/spidev0.0,/dev/gpiochip0,busy=24,dio1=16,reset=18,tcxo=1.8
 ```
 
-Both live behind the `hardware` cargo feature, on by default. Members on
-hardware need no hub: the air is the medium.
+All three live behind the `hardware` cargo feature, on by default. Members
+on hardware need no hub: the air is the medium. The RNode and SPI adapters
+(D21) have not met a board; the RNode one never will carry the protocol
+well, since RNode firmware's CSMA delays every frame by up to seconds at
+SF10 (D23).
 
 ## Security
 

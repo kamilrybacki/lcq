@@ -1284,3 +1284,51 @@ Left to the product, not the protocol: key and manifest provisioning
 (constants in the harness binary today), group-key rotation and member
 exclusion (evidence is kept, nothing acts on it), and a per-sender rate before
 signature verification. The threat model ranks them.
+
+## D23 — Real boards are reached through a bridge: the board is the wires, the driver stays on the host
+
+**Decided and implemented 2026-09-19; the first boards arrive 2026-09-22.**
+Three Seeed XIAO ESP32-S3 + Wio-SX1262 kits (the B2B-connector version) are
+the first hardware. Two roads reached them without new firmware: `RNode`
+firmware, which supports the kit since 1.82 and which the D21 KISS adapter
+already drives, or a Linux single-board computer over `spidev`, which the kit
+is not. `RNode` was measured against its source (1.86): every transmission
+goes through its CSMA -- wait for a free medium, a DIFS of two slots of
+twelve symbols (197 ms at SF10), then a contention window of 0 to 13 slots on
+a quiet channel and 15 to 29 above 7 % airtime, that is 0.2 to 1.5 s of
+random delay per frame and up to 3 s under load -- and the preamble is forced
+to at least 18 symbols, with a one-byte header on the air. A modem that
+decides when to transmit cannot carry a protocol whose slots are anchored on
+the trigger: the timing split check would take every late frame for a split,
+and any guard measured through it would be `RNode`'s, not the chip's.
+
+So the board is made into wires. The bridge firmware (`firmware/bridge`)
+exposes SPI transactions, BUSY, DIO1, NRESET and the receive-side antenna
+switch over a KISS-framed request/response protocol on USB CDC, and the
+unmodified `lora-phy` driver runs on the host through `BridgeSpi`, `BridgeIv`
+and `BridgeWatch` -- the third implementation of the seam that already
+carries the virtual chip and the Linux bus. What this buys: the chip's own
+timing; `GetIrqStatus` readable between the driver's transactions, so a CRC
+failure is seen on real hardware without waiting for upstream #487; CAD; and
+one code path from the container fleets to the bench. What it costs: a USB
+round trip per SPI transaction (well under a millisecond, against frames of
+a second) and DIO1 as an event over the same pipe, with the level re-read
+every 100 ms during a wait in case an edge went missing.
+
+The protocol is specified in `bridge.rs` and implemented twice: by the
+firmware and by the reference device on the virtual chip, which the tests
+drive through a pseudo-terminal pair. The firmware must match the reference
+byte for byte; a difference is a firmware bug. The version is the first byte
+of `HELLO`'s reply, and a mismatch refuses to bring the radio up.
+
+The firmware is Arduino C++ rather than Rust: it is three hundred lines of
+glue, the board's own core is the toolchain Seeed and `RNode` use, and that
+toolchain is several gigabytes, so it is built in GitHub Actions and never on
+the workstation. Boards are one file each behind a `Board` interface; an
+unknown FQBN is a build error, never a guess at pins. It lives in this
+repository while the protocol is young; once frozen on hardware it can move
+to its own repository with the host crate, since neither side knows LCQ.
+
+Not decided: whether a vessel node is a host plus a bridge, or the protocol
+on the microcontroller itself. The bridge answers the qualification question
+either way.

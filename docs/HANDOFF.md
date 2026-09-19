@@ -368,6 +368,29 @@ the verdict: the wire crypto and crash ordering are sound, and the binary is
 an integration harness until provisioning, a signed manifest and epoch
 lifecycle, rollback-resistant nonce state and persisted replay state exist.
 
+### The bridge onto real boards (D23)
+
+Three XIAO ESP32-S3 + Wio-SX1262 kits arrive 2026-09-22. `RNode` firmware
+would have carried them with no work, but its CSMA adds 0.2 to 3 s of random
+delay per frame at SF10 and forces an 18-symbol preamble (D23 has the
+numbers, from its source), which breaks slotted access. Built instead:
+`firmware/bridge` (Arduino C++; a `Board` interface and one file per board;
+compiled by the `firmware` workflow into the `bridge-xiao-esp32s3` artifact,
+280 KB, no warnings); `src/infrastructure/sx126x/bridge.rs` (the protocol
+specified in the module docs, `Link` with a reader thread, `BridgeSpi`,
+`BridgeIv` and `BridgeWatch` under the unmodified driver, `BridgeRadio` behind
+the seam, and the reference device on the virtual chip);
+`lcq-node --radio bridge:/dev/ttyACM0[,tcxo=1.8|tcxo=none][,ldo]`. Tests,
+`tests/sx126x_bridge.rs` (8): the codec, `HELLO`, an SPI transaction through
+a pseudo-terminal to the chip, nobody there is a timeout, the driver brings a
+bridged chip up into receive, a frame arrives with its RSSI and SNR and a CRC
+failure is reported through `GetIrqStatus` over the wire, and two bridged
+radios exchange a frame over a medium. Gate: every non-container test,
+clippy clean, containers 20 of 20 on the hub (670 s) and 20 of 20 on the
+virtual SX1262 (620 s); the multiprocess restart test failed once while the
+host was also compiling and passed alone in 46 s. Tuesday is
+`HARDWARE-BRINGUP.md`.
+
 ### What to pick up next
 
 1. **Provisioning and key lifecycle** (THREAT-MODEL F4, F5, F18) — before any
@@ -375,12 +398,15 @@ lifecycle, rollback-resistant nonce state and persisted replay state exist.
    on the device; group key per epoch from Vault/sops through Morsik; fail
    closed on fixture keys and on a missing or restored journal. This is the
    product's decision to make and the protocol's to enforce.
-2. **Hardware qualification** (roadmap M8): both adapters exist (D21) and
-   have never seen a board. Two SX1262 boards first -- RNode firmware over USB
-   needs no firmware work -- then five. First measurements, wired through
-   attenuators: bring-up on both adapters, `SetTx` to `TxDone`, `SetRx` to the
-   first catchable preamble, the late-listener and capture thresholds the
-   model guesses at, CAD latency, sleep/wake.
+2. **Hardware qualification** (roadmap M8): three XIAO ESP32-S3 +
+   Wio-SX1262 kits from 2026-09-22, through the bridge (D23), following
+   `HARDWARE-BRINGUP.md`: flash, `HELLO`, one board to `chip_up`, two boards
+   a frame across the desk, three boards a `--fleet 3` round. Then the
+   numbers the model guesses at, wired through attenuators: the SPI round
+   trip over USB, `SetTx` to `TxDone` and `SetRx` to the first catchable
+   preamble against the profile's airtime, DIO1 event latency, slot arrival
+   jitter, the late-listener and capture thresholds, CAD latency, sleep/wake.
+   Two more kits would make a fleet of five, which tolerates one loss.
 3. **Chip model fidelity** — what is left of Hermes's review of D16 after
    D19: the medium's three outcomes, time-aware capture, the CAD state
    machine, the derived late-listener threshold and the `chip_missed`

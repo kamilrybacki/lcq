@@ -50,17 +50,17 @@ Plug the XIAO in over USB-C; it enumerates as `/dev/ttyACM0` on Linux. If
 the port does not appear, hold BOOT while pressing RESET to enter the
 bootloader by hand.
 
-With the artifact's `esp32.esp32.XIAO_ESP32S3` directory in `build/`:
+With the artifact's `esp32.esp32.XIAO_ESP32S3` directory in `build/`, the
+merged image (bootloader, partition table and application in one) goes at
+offset zero:
 
 ```sh
-esptool --chip esp32s3 --port /dev/ttyACM0 --baud 921600 write_flash \
-  0x0     build/esp32.esp32.XIAO_ESP32S3/bridge.ino.bootloader.bin \
-  0x8000  build/esp32.esp32.XIAO_ESP32S3/bridge.ino.partitions.bin \
-  0x10000 build/esp32.esp32.XIAO_ESP32S3/bridge.ino.bin
+esptool --chip esp32s3 --port /dev/ttyACM0 --baud 921600 write_flash 0x0 \
+  build/esp32.esp32.XIAO_ESP32S3/bridge.ino.merged.bin
 ```
 
-If the build directory holds a `bridge.ino.merged.bin`, that single file at
-offset `0x0` is the same thing.
+The separate images are there too: `bridge.ino.bootloader.bin` at `0x0`,
+`bridge.ino.partitions.bin` at `0x8000`, `bridge.ino.bin` at `0x10000`.
 
 ## First contact
 

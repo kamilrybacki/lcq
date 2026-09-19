@@ -34,7 +34,9 @@ use lcq::domain::quorum::{Policy, evaluate};
 use lcq::domain::state::{Case, TransitionError};
 use lcq::domain::time::{Clock, Timestamp};
 use lcq::infrastructure::rnode::RNodeRadio;
-use lcq::infrastructure::sx126x::{HardwareRadio, Pins, Sx126xRadio, TcxoCtrlVoltage};
+use lcq::infrastructure::sx126x::{
+    BridgeOptions, BridgeRadio, HardwareRadio, Pins, Sx126xRadio, TcxoCtrlVoltage,
+};
 use lcq::infrastructure::{HubRadio, LogJournal, ScaledClock};
 use lcq::sim::airtime_ms;
 use lcq::wire::{
@@ -1571,6 +1573,13 @@ enum RadioChoice {
     Sx1262,
     /// An `RNode` on a serial port: `rnode:/dev/ttyACM0`.
     RNode(String),
+    /// An SX1262 behind the bridge firmware on a serial port (D23):
+    /// `bridge:/dev/ttyACM0[,tcxo=1.8|tcxo=none][,ldo]`.
+    Bridge {
+        port: String,
+        tcxo_millivolts: Option<u32>,
+        use_dcdc: bool,
+    },
     /// An SX1262 on SPI and GPIO:
     /// `spi:/dev/spidev0.0,/dev/gpiochip0,busy=24,dio1=16,reset=18[,tcxo=1.8]`.
     Spi {
@@ -1591,7 +1600,36 @@ impl RadioChoice {
                 Self::RNode(spec["rnode:".len()..].to_string())
             }
             Some(spec) if spec.starts_with("spi:") => Self::parse_spi(&spec["spi:".len()..]),
+            Some(spec) if spec.starts_with("bridge:") => {
+                Self::parse_bridge(&spec["bridge:".len()..])
+            }
             _ => Self::Hub,
+        }
+    }
+
+    /// `port[,tcxo=V|tcxo=none][,ldo]`, defaulting to the XIAO ESP32-S3 +
+    /// Wio-SX1262 kit: a 1.8 V TCXO and the DC-DC converter.
+    fn parse_bridge(spec: &str) -> Self {
+        let mut parts = spec.split(',');
+        let port = parts.next().unwrap_or_default().to_string();
+        assert!(
+            !port.is_empty(),
+            "--radio bridge: expected port[,tcxo=V][,ldo], got {spec:?}"
+        );
+        let mut tcxo_millivolts = Some(1_800);
+        let mut use_dcdc = true;
+        for part in parts {
+            match part.split_once('=') {
+                Some(("tcxo", "none")) => tcxo_millivolts = None,
+                Some(("tcxo", volts)) => tcxo_millivolts = Some(millivolts(volts)),
+                None if part == "ldo" => use_dcdc = false,
+                _ => panic!("--radio bridge: unknown option {part:?} in {spec:?}"),
+            }
+        }
+        Self::Bridge {
+            port,
+            tcxo_millivolts,
+            use_dcdc,
         }
     }
 
@@ -1608,12 +1646,7 @@ impl RadioChoice {
                 Some(("busy", n)) => busy = n.parse().ok(),
                 Some(("dio1", n)) => dio1 = n.parse().ok(),
                 Some(("reset", n)) => reset = n.parse().ok(),
-                Some(("tcxo", v)) => {
-                    tcxo_millivolts = v
-                        .parse::<f64>()
-                        .ok()
-                        .map(|volts| (volts.clamp(0.0, 5.0) * 1_000.0).round() as u32);
-                }
+                Some(("tcxo", v)) => tcxo_millivolts = Some(millivolts(v)),
                 _ => {}
             }
         }
@@ -1639,8 +1672,30 @@ impl RadioChoice {
             Self::Hub => "hub",
             Self::Sx1262 => "sx1262",
             Self::RNode(_) => "rnode",
+            Self::Bridge { .. } => "bridge",
             Self::Spi { .. } => "spi",
         }
+    }
+}
+
+/// `1.8` -> 1800; a value that does not parse is refused loudly.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn millivolts(volts: &str) -> u32 {
+    let volts: f64 = volts
+        .parse()
+        .unwrap_or_else(|_| panic!("tcxo voltage {volts:?} is not a number"));
+    (volts.clamp(0.0, 5.0) * 1_000.0).round() as u32
+}
+
+/// The chip's nearest TCXO control voltage.
+fn tcxo_control(millivolts: u32) -> TcxoCtrlVoltage {
+    match millivolts {
+        ..1_700 => TcxoCtrlVoltage::Ctrl1V6,
+        1_700..1_900 => TcxoCtrlVoltage::Ctrl1V8,
+        1_900..2_500 => TcxoCtrlVoltage::Ctrl2V2,
+        2_500..2_900 => TcxoCtrlVoltage::Ctrl2V7,
+        2_900..3_200 => TcxoCtrlVoltage::Ctrl3V0,
+        _ => TcxoCtrlVoltage::Ctrl3V3,
     }
 }
 
@@ -1680,17 +1735,25 @@ fn open_radio(options: &Options) -> Box<dyn Radio> {
                 dio1: *dio1,
                 reset: *reset,
             };
-            let tcxo = tcxo_millivolts.map(|millivolts| match millivolts {
-                ..1_700 => TcxoCtrlVoltage::Ctrl1V6,
-                1_700..1_900 => TcxoCtrlVoltage::Ctrl1V8,
-                1_900..2_500 => TcxoCtrlVoltage::Ctrl2V2,
-                2_500..2_900 => TcxoCtrlVoltage::Ctrl2V7,
-                2_900..3_200 => TcxoCtrlVoltage::Ctrl3V0,
-                _ => TcxoCtrlVoltage::Ctrl3V3,
-            });
+            let tcxo = tcxo_millivolts.map(tcxo_control);
             Box::new(
                 HardwareRadio::open(device, &pins, tcxo, PhyProfile::eu868_sf10())
                     .unwrap_or_else(|error| panic!("SX1262 on {device}: {error}")),
+            )
+        }
+        RadioChoice::Bridge {
+            port,
+            tcxo_millivolts,
+            use_dcdc,
+        } => {
+            let options = BridgeOptions {
+                tcxo: tcxo_millivolts.map(tcxo_control),
+                use_dcdc: *use_dcdc,
+                ..BridgeOptions::default()
+            };
+            Box::new(
+                BridgeRadio::open_path(port, &options, PhyProfile::eu868_sf10())
+                    .unwrap_or_else(|error| panic!("bridge on {port}: {error}")),
             )
         }
     }

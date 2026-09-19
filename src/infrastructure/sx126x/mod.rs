@@ -13,6 +13,7 @@
 //! specifies and the hub can time is modelled; what only a front end knows is
 //! not.
 
+pub mod bridge;
 mod bus;
 mod chip;
 mod executor;
@@ -22,6 +23,7 @@ mod hardware;
 mod linux;
 mod radio;
 
+pub use bridge::{BridgeError, BridgeOptions, BridgeRadio};
 pub use bus::{HostDelay, SpiFault, VirtualIv, VirtualSpi};
 pub use chip::{
     Activity, Chip, ChipMode, ChipSnapshot, Counters, IRQ_CAD_DETECTED, IRQ_CAD_DONE, IRQ_CRC_ERR,
