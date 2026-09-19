@@ -20,6 +20,10 @@ pub const MAX_SOCKET_FRAME_BYTES: usize = 4096;
 pub const DELIVERY_TAG: u8 = 0x02;
 /// Bytes before the payload in an encoded delivery.
 pub const DELIVERY_HEADER_BYTES: usize = 9;
+/// First byte of a preamble notice.
+pub const PREAMBLE_TAG: u8 = 0x03;
+/// Length of an encoded preamble notice.
+pub const PREAMBLE_BYTES: usize = 7;
 
 /// How often, and how long, a node retries the hub before giving up.
 const CONNECT_ATTEMPTS: u32 = 300;
@@ -105,6 +109,75 @@ impl Delivery {
     }
 }
 
+/// A frame has just started at this receiver: what a chip's channel activity
+/// detector could notice, sent when the frame goes on the air, before its
+/// fate is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preamble {
+    /// Received power in dBm.
+    pub rssi_dbm: i16,
+    /// How long the frame will occupy the channel, in (scaled) milliseconds.
+    pub airtime_ms: u32,
+}
+
+impl Preamble {
+    /// The wire form: tag, RSSI, airtime.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(PREAMBLE_BYTES);
+        out.push(PREAMBLE_TAG);
+        out.extend_from_slice(&self.rssi_dbm.to_le_bytes());
+        out.extend_from_slice(&self.airtime_ms.to_le_bytes());
+        out
+    }
+
+    /// Parse the wire form.
+    #[must_use]
+    pub fn decode(encoded: &[u8]) -> Option<Self> {
+        if encoded.len() != PREAMBLE_BYTES || encoded[0] != PREAMBLE_TAG {
+            return None;
+        }
+        Some(Self {
+            rssi_dbm: i16::from_le_bytes([encoded[1], encoded[2]]),
+            airtime_ms: u32::from_le_bytes([encoded[3], encoded[4], encoded[5], encoded[6]]),
+        })
+    }
+}
+
+/// Anything the hub sends a node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Inbound {
+    /// A frame that ended here, with its verdict.
+    Delivery(Delivery),
+    /// A frame that just started here.
+    Preamble(Preamble),
+}
+
+impl Inbound {
+    /// Parse either kind by its first byte.
+    #[must_use]
+    pub fn decode(encoded: &[u8]) -> Option<Self> {
+        match encoded.first() {
+            Some(&DELIVERY_TAG) => Delivery::decode(encoded).map(Self::Delivery),
+            Some(&PREAMBLE_TAG) => Preamble::decode(encoded).map(Self::Preamble),
+            _ => None,
+        }
+    }
+}
+
+/// Write one preamble notice to a node, the way the hub does.
+///
+/// # Errors
+///
+/// Whatever the socket reports.
+pub fn write_preamble(stream: &mut TcpStream, preamble: &Preamble) -> std::io::Result<()> {
+    let encoded = preamble.encode();
+    let length = u32::try_from(encoded.len()).unwrap_or(0).to_le_bytes();
+    stream.write_all(&length)?;
+    stream.write_all(&encoded)?;
+    stream.flush()
+}
+
 /// Failure to join the emulated channel.
 #[derive(Debug)]
 pub enum HubError {
@@ -159,7 +232,7 @@ pub fn write_delivery(stream: &mut TcpStream, delivery: &Delivery) -> std::io::R
 /// thread of its own.
 pub struct HubSocket {
     writer: HubWriter,
-    inbox: Receiver<Delivery>,
+    inbox: Receiver<Inbound>,
 }
 
 impl HubSocket {
@@ -202,21 +275,27 @@ impl HubSocket {
         self.writer.send(bytes);
     }
 
-    /// The next delivery, if one has arrived. Never blocks.
+    /// The next delivery, if one has arrived; preamble notices are skipped,
+    /// for an adapter with no channel activity detector to feed. Never blocks.
     pub fn poll(&mut self) -> Option<Delivery> {
-        self.inbox.try_recv().ok()
+        loop {
+            match self.inbox.try_recv().ok()? {
+                Inbound::Delivery(delivery) => return Some(delivery),
+                Inbound::Preamble(_) => {}
+            }
+        }
     }
 
-    /// Split into the writer and the stream of deliveries, for adapters that
-    /// run each on a thread of its own.
+    /// Split into the writer and the stream of everything inbound, for
+    /// adapters that run each on a thread of its own.
     #[must_use]
-    pub fn into_parts(self) -> (HubWriter, Receiver<Delivery>) {
+    pub fn into_parts(self) -> (HubWriter, Receiver<Inbound>) {
         (self.writer, self.inbox)
     }
 }
 
-/// Read length-prefixed deliveries until the socket closes or misbehaves.
-fn read_deliveries(mut reader: TcpStream, sender: &Sender<Delivery>) {
+/// Read length-prefixed messages until the socket closes or misbehaves.
+fn read_deliveries(mut reader: TcpStream, sender: &Sender<Inbound>) {
     let mut length = [0u8; 4];
     while reader.read_exact(&mut length).is_ok() {
         let size = u32::from_le_bytes(length) as usize;
@@ -227,11 +306,11 @@ fn read_deliveries(mut reader: TcpStream, sender: &Sender<Delivery>) {
         if reader.read_exact(&mut encoded).is_err() {
             return;
         }
-        let Some(delivery) = Delivery::decode(&encoded) else {
+        let Some(inbound) = Inbound::decode(&encoded) else {
             // A peer speaking another format is not one worth listening to.
             return;
         };
-        if sender.send(delivery).is_err() {
+        if sender.send(inbound).is_err() {
             return;
         }
     }

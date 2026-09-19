@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lcq::application::RadioEvent;
-use lcq::infrastructure::hub::{Delivery, Verdict};
+use lcq::infrastructure::hub::{Delivery, Preamble, Verdict};
 use lcq::infrastructure::sx126x::{
     Chip, ChipMode, HostDelay, IRQ_CRC_ERR, IRQ_HEADER_ERR, IRQ_RX_DONE, VirtualIv, VirtualSpi,
     block_on,
@@ -405,4 +405,44 @@ fn a_header_error_is_heard_but_nothing_is_received() {
     assert_eq!(snapshot.counters.header_errors, 1);
     assert_eq!(snapshot.counters.received, 0);
     assert_eq!(snapshot.mode, ChipMode::Receive);
+}
+
+impl Bench {
+    /// One channel activity detection, as the driver runs it.
+    fn detect(&mut self) -> bool {
+        block_on(self.driver.prepare_for_cad(&self.modulation)).expect("prepare cad");
+        block_on(self.driver.cad(&self.modulation)).expect("cad")
+    }
+}
+
+#[test]
+fn channel_activity_detection_hears_a_preamble_and_nothing_else() {
+    // Real time: a preamble of 13 symbols is about 106 ms, a detection of
+    // eight symbols about 65 ms, and the driver's own command latency does
+    // not eat either.
+    let mut bench = bench(1);
+    assert!(!bench.detect(), "an empty channel");
+    let snapshot = bench.chip.snapshot();
+    assert_eq!(snapshot.counters.cad_runs, 1);
+    assert_eq!(snapshot.counters.cad_detections, 0);
+    assert_eq!(
+        snapshot.mode,
+        ChipMode::StandbyRc,
+        "exit mode 0: back to standby"
+    );
+
+    // A frame has just started: its preamble is on the air during the
+    // detection window.
+    bench.chip.notice_preamble(&Preamble {
+        rssi_dbm: -100,
+        airtime_ms: 2_000,
+    });
+    assert!(bench.detect(), "a preamble under the detector");
+    assert_eq!(bench.chip.snapshot().counters.cad_detections, 1);
+
+    // The same frame, deep into its payload: nothing a preamble detector
+    // recognises.
+    thread::sleep(Duration::from_millis(200));
+    assert!(!bench.detect(), "a payload in progress is not a preamble");
+    assert_eq!(bench.chip.snapshot().counters.cad_detections, 1);
 }

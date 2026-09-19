@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use lora_modulation::{Bandwidth, BaseBandModulationParams, CodingRate, SpreadingFactor};
 
 use crate::application::RadioEvent;
-use crate::infrastructure::hub::{Delivery, Verdict};
+use crate::infrastructure::hub::{Delivery, Preamble, Verdict};
 
 // The opcodes the model acts on or answers. DS.SX1261-2 table 11-1; the values
 // are the datasheet's, not the driver's, so the model does not lean on the
@@ -42,6 +42,7 @@ const OP_SET_TX: u8 = 0x83;
 const OP_SET_RX: u8 = 0x82;
 const OP_SET_RX_DUTY_CYCLE: u8 = 0x94;
 const OP_SET_CAD: u8 = 0xC5;
+const OP_SET_CAD_PARAMS: u8 = 0x88;
 const OP_GET_PACKET_TYPE: u8 = 0x11;
 const OP_SET_RF_FREQUENCY: u8 = 0x86;
 const OP_SET_BUFFER_BASE_ADDRESS: u8 = 0x8F;
@@ -71,6 +72,8 @@ pub const IRQ_HEADER_ERR: u16 = 0x0020;
 pub const IRQ_CRC_ERR: u16 = 0x0040;
 /// `CadDone`: channel activity detection finished.
 pub const IRQ_CAD_DONE: u16 = 0x0080;
+/// `CadDetected`: it found a preamble.
+pub const IRQ_CAD_DETECTED: u16 = 0x0100;
 /// `Timeout`: a timed receive or transmit ran out.
 pub const IRQ_TIMEOUT: u16 = 0x0200;
 
@@ -141,6 +144,10 @@ pub struct Counters {
     pub missed_late: u32,
     /// Timed receives that ran out.
     pub timeouts: u32,
+    /// Channel activity detections run.
+    pub cad_runs: u32,
+    /// Channel activity detections that found a preamble.
+    pub cad_detections: u32,
 }
 
 /// A view of the model.
@@ -172,8 +179,27 @@ struct Packet {
 
 #[derive(Debug, Clone, Copy)]
 enum Timer {
-    TxDone { after: Duration, generation: u64 },
-    RxTimeout { after: Duration, generation: u64 },
+    TxDone {
+        after: Duration,
+        generation: u64,
+    },
+    RxTimeout {
+        after: Duration,
+        generation: u64,
+    },
+    CadDone {
+        after: Duration,
+        generation: u64,
+        detected: bool,
+    },
+}
+
+/// A frame the medium said has started here, and when its preamble ends.
+#[derive(Debug, Clone, Copy)]
+struct OnAir {
+    started: Instant,
+    preamble_until: Instant,
+    until: Instant,
 }
 
 struct Model {
@@ -202,6 +228,10 @@ struct Model {
     busy_until: Option<Instant>,
     host_wake: bool,
     counters: Counters,
+    /// Frames the medium reported starting here, for the activity detector.
+    on_air: Vec<OnAir>,
+    /// Symbols one detection examines, from `SetCadParams`.
+    cad_symbols: u8,
 }
 
 impl Model {
@@ -232,6 +262,8 @@ impl Model {
             busy_until: None,
             host_wake: false,
             counters: Counters::default(),
+            on_air: Vec::new(),
+            cad_symbols: 8,
         }
     }
 
@@ -529,11 +561,18 @@ impl Chip {
                 timer = self.begin_receive(&mut model, [at(0), at(1), at(2)]);
                 Vec::new()
             }
+            OP_SET_CAD_PARAMS => {
+                model.cad_symbols = match at(0) {
+                    0x00 => 1,
+                    0x01 => 2,
+                    0x02 => 4,
+                    0x04 => 16,
+                    _ => 8,
+                };
+                Vec::new()
+            }
             OP_SET_CAD => {
-                // Exit mode 0: back to standby once done. The medium does not
-                // yet say whether anyone is on the air, so nothing is detected.
-                model.set_mode(ChipMode::StandbyRc);
-                model.raise(IRQ_CAD_DONE);
+                timer = Some(self.begin_cad(&mut model));
                 Vec::new()
             }
             _ => {
@@ -585,10 +624,59 @@ impl Chip {
         }
     }
 
+    /// `SetCAD`: listen for the configured number of symbols and say whether a
+    /// preamble was on the air meanwhile. A deliberately simple detector: it
+    /// finds a frame whose preamble overlaps the detection window on this
+    /// channel, and nothing else -- not a payload in progress, not a signal
+    /// below sensitivity (the medium never reports those). Exit mode 0: back
+    /// to standby once done.
+    fn begin_cad(&self, model: &mut Model) -> Timer {
+        let now = Instant::now();
+        let window = self.scaled(
+            model.modulation.map_or(Duration::from_millis(8), |params| {
+                Duration::from_micros(u64::from(params.symbol_duration_us()))
+            }) * u32::from(model.cad_symbols),
+        );
+        let until = now + window;
+        model.on_air.retain(|frame| frame.until > now);
+        let detected = model
+            .on_air
+            .iter()
+            .any(|frame| frame.started <= until && frame.preamble_until >= now);
+        model.set_mode(ChipMode::FrequencySynthesis);
+        model.counters.cad_runs += 1;
+        if detected {
+            model.counters.cad_detections += 1;
+        }
+        Timer::CadDone {
+            after: window,
+            generation: model.generation,
+            detected,
+        }
+    }
+
+    /// The medium says a frame has just started here.
+    pub fn notice_preamble(&self, preamble: &Preamble) {
+        let mut model = self.lock();
+        let now = Instant::now();
+        let symbol = model.modulation.map_or(Duration::from_millis(8), |params| {
+            Duration::from_micros(u64::from(params.symbol_duration_us()))
+        });
+        let preamble_symbols = u32::from(model.packet.preamble_symbols) + 5;
+        model.on_air.retain(|frame| frame.until > now);
+        model.on_air.push(OnAir {
+            started: now,
+            preamble_until: now + self.scaled(symbol * preamble_symbols),
+            until: now + Duration::from_millis(u64::from(preamble.airtime_ms)),
+        });
+    }
+
     fn arm(&self, timer: Timer) {
         let chip = self.clone();
         let after = match timer {
-            Timer::TxDone { after, .. } | Timer::RxTimeout { after, .. } => after,
+            Timer::TxDone { after, .. }
+            | Timer::RxTimeout { after, .. }
+            | Timer::CadDone { after, .. } => after,
         };
         thread::spawn(move || {
             thread::sleep(after);
@@ -613,7 +701,21 @@ impl Chip {
                     model.raise(IRQ_TIMEOUT);
                     model.counters.timeouts += 1;
                 }
-                Timer::TxDone { .. } | Timer::RxTimeout { .. } => {}
+                Timer::CadDone {
+                    generation,
+                    detected,
+                    ..
+                } if model.mode == ChipMode::FrequencySynthesis
+                    && model.generation == generation =>
+                {
+                    model.set_mode(ChipMode::StandbyRc);
+                    model.raise(if detected {
+                        IRQ_CAD_DONE | IRQ_CAD_DETECTED
+                    } else {
+                        IRQ_CAD_DONE
+                    });
+                }
+                Timer::TxDone { .. } | Timer::RxTimeout { .. } | Timer::CadDone { .. } => {}
             }
         }
         self.inner.wake.notify_all();

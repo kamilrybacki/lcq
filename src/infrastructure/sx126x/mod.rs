@@ -20,8 +20,8 @@ mod radio;
 
 pub use bus::{HostDelay, SpiFault, VirtualIv, VirtualSpi};
 pub use chip::{
-    Activity, Chip, ChipMode, ChipSnapshot, Counters, IRQ_CAD_DONE, IRQ_CRC_ERR, IRQ_HEADER_ERR,
-    IRQ_RX_DONE, IRQ_TIMEOUT, IRQ_TX_DONE,
+    Activity, Chip, ChipMode, ChipSnapshot, Counters, IRQ_CAD_DETECTED, IRQ_CAD_DONE, IRQ_CRC_ERR,
+    IRQ_HEADER_ERR, IRQ_RX_DONE, IRQ_TIMEOUT, IRQ_TX_DONE,
 };
 pub use executor::block_on;
 pub use radio::{StartError, Sx126xRadio};

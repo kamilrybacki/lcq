@@ -22,7 +22,7 @@ use super::bus::{HostDelay, VirtualIv, VirtualSpi};
 use super::chip::{Chip, IRQ_CRC_ERR, IRQ_HEADER_ERR};
 use super::executor::block_on;
 use crate::application::{PhyProfile, Radio, RadioError, RadioEvent, Received};
-use crate::infrastructure::hub::{HubError, HubSocket};
+use crate::infrastructure::hub::{HubError, HubSocket, Inbound};
 
 /// The chip's data buffer: the most a `LoRa` frame can carry.
 const MAX_PAYLOAD_BYTES: usize = 255;
@@ -97,8 +97,11 @@ impl Sx126xRadio {
         thread::Builder::new()
             .name(format!("sx126x-medium-{index}"))
             .spawn(move || {
-                for delivery in deliveries {
-                    listener.deliver(&delivery);
+                for inbound in deliveries {
+                    match inbound {
+                        Inbound::Delivery(delivery) => listener.deliver(&delivery),
+                        Inbound::Preamble(preamble) => listener.notice_preamble(&preamble),
+                    }
                 }
             })
             .map_err(StartError::Thread)?;

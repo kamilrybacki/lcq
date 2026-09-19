@@ -22,9 +22,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lcq::application::PhyProfile;
-use lcq::infrastructure::hub::{Delivery, Verdict, write_delivery};
+use lcq::infrastructure::hub::{Delivery, Preamble, Verdict, write_delivery, write_preamble};
 use lcq::sim::{
-    Acquisition, Link, Reception, TX_POWER_DBM, Transmission, airtime_ms, judge, rssi_dbm, snr_db,
+    Acquisition, Link, Reception, SENSITIVITY_DBM, TX_POWER_DBM, Transmission, airtime_ms, judge,
+    rssi_dbm, snr_db,
 };
 use lcq::wire::peek_frame_header;
 
@@ -182,6 +183,7 @@ fn relay(
                 let air = Duration::from_millis(
                     airtime_ms(incoming.bytes.len()) / u64::from(options.scale).max(1),
                 );
+                announce_start(&incoming, air, writers, options);
                 frames.push(InFlight {
                     from: incoming.from,
                     bytes: incoming.bytes,
@@ -210,6 +212,35 @@ fn relay(
         // Keep settled frames a little longer than any frame can last, so a
         // frame that started during one of them still finds it.
         frames.retain(|f| !f.done || f.ends_at + Duration::from_secs(5) > now);
+    }
+}
+
+/// Tell every receiver in range that a frame has begun: what its channel
+/// activity detector could notice, before the frame's fate is known.
+fn announce_start(
+    incoming: &Incoming,
+    air: Duration,
+    writers: &Arc<Mutex<HashMap<usize, TcpStream>>>,
+    options: &Options,
+) {
+    let mut guard = writers.lock().expect("lock");
+    let targets: Vec<usize> = guard.keys().copied().collect();
+    for target in targets {
+        if target == incoming.from || !options.reaches(incoming.from, target) {
+            continue;
+        }
+        let power = options.rssi(incoming.from, target);
+        if power < SENSITIVITY_DBM {
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let preamble = Preamble {
+            rssi_dbm: power.round().clamp(-300.0, 100.0) as i16,
+            airtime_ms: u32::try_from(air.as_millis()).unwrap_or(u32::MAX),
+        };
+        if let Some(stream) = guard.get_mut(&target) {
+            let _ = write_preamble(stream, &preamble);
+        }
     }
 }
 
