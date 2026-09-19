@@ -20,7 +20,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lcq::application::{AirtimeBudget, Journal, OutgoingFrame};
+use lcq::application::{AirtimeBudget, Journal, OutgoingFrame, Priority, RadioQueue};
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
@@ -204,6 +204,14 @@ fn main() {
     let mut nacked_rounds: u64 = 0;
     let mut repair_due: Option<Instant> = None;
     let mut repaired_round: Option<u64> = None;
+    // Whether the resend slot owes our own vote, and the frames of OTHER
+    // members we have been asked to carry. This is the relaying D2 promised in
+    // place of a slower spreading factor: a member that heard both ends of a
+    // line carries one end's vote to the other, in its own slot, with the
+    // signature and the seal exactly as they were. Bounded, and fair between
+    // classes, so a flood of requests cannot crowd out our own vote.
+    let mut owe_resend = false;
+    let mut forwards = RadioQueue::with_capacity(64, 64 * MAX_FRAME_BYTES);
     // The round this node joined, and whether anybody turned out to be in a
     // different one. Signatures do not stop a member saying two things, so a
     // compromised opener can leave halves of a fleet counting slots from
@@ -745,9 +753,29 @@ fn main() {
             && Instant::now() >= at
         {
             repair_due = None;
-            if let Some(again) = journal.pending().next().map(|f| f.bytes().to_vec()) {
-                transmit(&mut link, &mut budget, &again, started, &options, &clock);
-                report(&options, &clock, "{\"event\":\"repaired\"}");
+            // One frame per slot. Our own vote first; a carried vote otherwise.
+            if owe_resend {
+                owe_resend = false;
+                if let Some(again) = journal.pending().next().map(|f| f.bytes().to_vec()) {
+                    transmit(&mut link, &mut budget, &again, started, &options, &clock);
+                    report(&options, &clock, "{\"event\":\"repaired\"}");
+                }
+            } else if let Some(carried) = forwards.take_next() {
+                let author = carried.sequence() >> 48;
+                if transmit(
+                    &mut link,
+                    &mut budget,
+                    carried.bytes(),
+                    started,
+                    &options,
+                    &clock,
+                ) {
+                    report(
+                        &options,
+                        &clock,
+                        &format!("{{\"event\":\"forwarded\",\"from\":{author}}}"),
+                    );
+                }
             }
         }
 
@@ -803,15 +831,51 @@ fn main() {
                 // slot of the resend window, from the outbox -- the same bytes
                 // the journal committed, never a fresh decision.
                 if learned.nack
-                    && !learned.heard.contains(options.index)
-                    && repair_due.is_none()
-                    && journal.has_voted(&subject, &member_id(options.index))
                     && let Some(round_index) = repair_round()
                     && repaired_round != Some(round_index)
                 {
-                    repaired_round = Some(round_index);
-                    let resend_window = u32::try_from(2 * round_index + 1).unwrap_or(u32::MAX);
-                    repair_due = Some(repair_start + window_wall * resend_window + own_slot);
+                    // Our own vote, if the requester lacks it.
+                    let owes_own = !learned.heard.contains(options.index)
+                        && journal.has_voted(&subject, &member_id(options.index));
+                    // Other members' votes, if the requester lacks them, can
+                    // hear us, and we hold them -- verified, journalled, as
+                    // they arrived. Whoever else holds them queues them too;
+                    // each forwards in its own slot, so copies never collide,
+                    // and the requester drops every copy after the first.
+                    let mut queued = 0usize;
+                    if learned.heard.contains(options.index) {
+                        for (author, bytes) in journal.witnessed() {
+                            let Some(held) = member_index(author) else {
+                                continue;
+                            };
+                            if held == from || learned.heard.contains(held) {
+                                continue;
+                            }
+                            let Ok((_, sequence)) = peek_frame_header(bytes) else {
+                                continue;
+                            };
+                            let frame =
+                                OutgoingFrame::new(bytes.to_vec(), forward_key(held, sequence));
+                            if forwards.offer(frame, Priority::Routine).is_ok() {
+                                queued += 1;
+                            }
+                        }
+                    }
+                    if owes_own || queued > 0 {
+                        repaired_round = Some(round_index);
+                        owe_resend = owes_own;
+                        let resend_window = u32::try_from(2 * round_index + 1).unwrap_or(u32::MAX);
+                        repair_due = Some(repair_start + window_wall * resend_window + own_slot);
+                        if queued > 0 {
+                            report(
+                                &options,
+                                &clock,
+                                &format!(
+                                    "{{\"event\":\"carrying\",\"for\":{from},\"frames\":{queued}}}"
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             if let Some((from, _)) = learned.verified {
@@ -1548,6 +1612,17 @@ const fn stage_name(stage: Stage) -> &'static str {
         Stage::Consultation => "consultation",
         Stage::BindingSupport => "binding",
     }
+}
+
+/// The identity a carried frame is de-duplicated under.
+///
+/// The queue keys on one number and members count their sequences
+/// independently from zero, so two members' frames with equal sequence numbers
+/// would otherwise look like one frame. The author goes in the top sixteen
+/// bits, which leaves forty-eight for the sequence -- more than a member sends
+/// in a lifetime of rounds.
+fn forward_key(author: usize, sequence: u64) -> u64 {
+    (u64::try_from(author).unwrap_or(0) << 48) | (sequence & 0x0000_FFFF_FFFF_FFFF)
 }
 
 /// The index a member id names, if it is one this node issues.

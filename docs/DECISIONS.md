@@ -953,3 +953,50 @@ simulator has Rician fading, the emulator is kept deterministic so a failure
 replays), no sea state, no mast sway, no traffic from outside the fleet. It
 distinguishes a plausible link from a hopeless one. Nothing here supports a
 claim about real maritime range.
+
+---
+
+## D15 — Members carry each other's votes: the relaying D2 promised
+
+**Decided and measured 2026-09-19.**
+
+D2 settled the spreading factor by putting longer range on relaying: two SF10
+hops cost less airtime than one SF12 hop and reach further. The node never
+relayed anything. `RadioQueue` — bounded, priority with a guaranteed share for
+routine traffic, de-duplicating — sat in the application layer with nothing
+running it, and D14's geometry test showed the exact scenario it was for: the
+two ends of a line deaf to each other, the middle hearing both.
+
+### How a vote gets carried
+
+Only on request, never speculatively — every frame is airtime. When a repair
+request arrives (D10) from a member R that can hear us (our bit is set in what R
+holds), and R lacks a member X whose binding vote we hold — verified when it
+arrived, journalled as the frame itself (D11) — that frame is queued to be
+carried, **unchanged**: same signature, same seal, same cleartext header. In
+our own slot of the resend window we send one frame: our own vote if R lacked
+that, otherwise the next carried one. Every other holder queues the same frame
+and sends in *its* own slot, so copies never collide, and R drops each copy
+after the first as a replay of a sequence it now holds.
+
+The queue's identity is one number and members count sequences from zero, so
+carried frames are keyed by author and sequence together. Sixty-four frames
+deep, one per slot per round, three rounds: a middle member carries at most
+three votes per deliberation, and nothing it carries can displace its own vote.
+
+### Measured
+
+Five vessels eight kilometres apart, the ends past the radio horizon from each
+other. Eleven frames fell below sensitivity between the ends; six were carried
+by the middle; the tally is **[5, 5, 5, 5, 5]**. Before this change it was
+[4, 5, 5, 5, 4] — every member at or above the threshold either way, but with
+relaying the fleet also *agrees on the count*, which is the stronger property.
+
+### What relaying does not do
+
+It cannot help a member nobody can hear. It does not extend a signed validity —
+a carried frame is the original frame and expires when it does. It adds airtime
+exactly where a request shows it is needed and nowhere else. And a compromised
+member can request repairs it does not need and cost each holder one carried
+frame per round: bounded, and the same class of cost as an empty-list request
+(D10).

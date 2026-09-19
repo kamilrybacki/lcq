@@ -1667,28 +1667,23 @@ fn geometry_puts_the_far_ends_of_a_line_out_of_each_others_hearing() {
                 .count()
         });
     let tallies: Vec<usize> = finals.iter().map(|f| f.supporters).collect();
+    let carried: usize = ships.iter().map(|s| count_in_log(s, "\"forwarded\"")).sum();
     note(&format!(
-        "  linia 5 x 8 km: {weak} ramek ponizej czulosci, tally {tallies:?}, prog {}",
+        "  linia 5 x 8 km: {weak} ramek ponizej czulosci, {carried} przekazanych, tally {tallies:?}, prog {}",
         finals[0].threshold
     ));
     note_anomalies(&ships);
 
     assert!(weak >= 2, "the two ends must be inaudible to each other");
+    assert!(
+        carried >= 2,
+        "the middle must have carried a vote to each end"
+    );
     for (index, result) in finals.iter().enumerate() {
         assert!(result.endorsed, "statek {index} nie zatwierdzil");
-    }
-    assert_eq!(
-        finals[0].supporters, 4,
-        "koniec linii nie slyszy drugiego konca"
-    );
-    assert_eq!(
-        finals[4].supporters, 4,
-        "koniec linii nie slyszy drugiego konca"
-    );
-    for (index, result) in finals.iter().enumerate().take(4).skip(1) {
         assert_eq!(
-            result.supporters, 5,
-            "statek {index}: srodek slyszy wszystkich"
+            result.supporters, fleet,
+            "statek {index}: przekaz przez srodek uzupelnia tally konca linii"
         );
     }
 }

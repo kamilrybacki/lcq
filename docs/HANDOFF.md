@@ -262,6 +262,12 @@ model over 512 random histories. Two faulty members of five -- the whole budget
 propagation model, so a line of vessels has real geometry. Flake rate measured:
 54 of 54 container tests in three isolated runs.
 
+### Relaying (D15)
+
+On a repair request the middle of a line carries each end's vote to the other,
+unchanged, in its own slot. Geometry test tally went from [4, 5, 5, 5, 4] to
+[5, 5, 5, 5, 5]. This is the range-by-relaying D2 chose over SF12, working.
+
 ### What to pick up next
 
 1. **Equivocation on the trigger** (D6) — the one open blocker. Slots must
@@ -271,8 +277,8 @@ propagation model, so a line of vessels has real geometry. Flake rate measured:
 2. **Acknowledgement on the air** (D4) — worth roughly 4.5x the airtime. Nothing
    carries the fact today; `Journal::acknowledge` exists but no frame says it.
 3. **Short case reference** (D4) — 23 % off every frame, no security traded.
-4. Still unexercised: `RadioQueue` (priority, dedup, distress burst) -- the
-   node has its own send loop and never uses it. Either the node adopts it or
-   it is removed; a module nothing runs is a liability.
+4. `RadioQueue` is now what the node carries other members' votes with, on
+   request (D15). The distress class exists and nothing yet uses it; the first
+   application traffic that is genuinely urgent should.
 5. From review: per-sender replay windows with retention limits, cheap rejection
    of senders outside the manifest.
