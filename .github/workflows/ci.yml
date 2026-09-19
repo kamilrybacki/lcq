@@ -33,5 +33,12 @@ jobs:
           for source in tests/*.rs; do
             name=$(basename "$source" .rs)
             [ "$name" = containers ] && continue
-            cargo test --test "$name"
+            # The multiprocess suite spawns a fleet of real processes per
+            # test; five fleets at once on a two-core runner starve each
+            # other of the slots they time, so it runs one test at a time.
+            if [ "$name" = multiprocess ]; then
+              cargo test --test "$name" -- --test-threads=1
+            else
+              cargo test --test "$name"
+            fi
           done

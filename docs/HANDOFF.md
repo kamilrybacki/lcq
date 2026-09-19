@@ -387,9 +387,11 @@ bridged chip up into receive, a frame arrives with its RSSI and SNR and a CRC
 failure is reported through `GetIrqStatus` over the wire, and two bridged
 radios exchange a frame over a medium. Gate: every non-container test,
 clippy clean, containers 20 of 20 on the hub (670 s) and 20 of 20 on the
-virtual SX1262 (620 s); the multiprocess restart test failed once while the
-host was also compiling and passed alone in 46 s. Tuesday is
-`HARDWARE-BRINGUP.md`.
+virtual SX1262 (620 s). The multiprocess suite flaked twice today under
+load -- the restart test locally while the host was also compiling (passed
+alone in 46 s), and the vote-lock test in CI on a firmware-only commit -- so
+CI now runs that suite one test at a time; it is timing-sensitive by nature,
+five fleets of real processes at once. Tuesday is `HARDWARE-BRINGUP.md`.
 
 ### What to pick up next
 
