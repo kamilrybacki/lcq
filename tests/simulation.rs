@@ -159,7 +159,11 @@ fn geometry_lets_a_near_member_capture_over_a_distant_one() {
         Reception::Decoded,
         "the near station is far more than the capture margin ahead"
     );
-    assert_eq!(receive(&far, &[near]), Reception::Collided);
+    assert_eq!(
+        receive(&far, &[near]),
+        Reception::NoLock,
+        "the near frame was on the air over the far one's preamble"
+    );
 }
 
 #[test]

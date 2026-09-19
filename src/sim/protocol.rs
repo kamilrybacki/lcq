@@ -530,7 +530,7 @@ impl Deliberation {
                     receive(frame, &others)
                 };
                 match heard {
-                    Reception::Collided => {
+                    Reception::NoLock | Reception::HeaderError | Reception::CrcError => {
                         report.collided += 1;
                         retry.push(*sender);
                     }

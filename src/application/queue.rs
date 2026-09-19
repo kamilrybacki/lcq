@@ -139,6 +139,18 @@ impl RadioQueue {
         Ok(())
     }
 
+    /// Forget a frame identity, so the same frame may be offered again.
+    ///
+    /// The dedup memory stops a frame being queued twice by accident. A
+    /// repair request is not an accident: it says the requester still lacks
+    /// the frame, and the holder must be able to carry it again in the next
+    /// round. Whoever asks for that says so here, frame by frame.
+    pub fn forget(&mut self, sequence: u64) {
+        if self.seen.remove(&sequence) {
+            self.seen_order.retain(|remembered| *remembered != sequence);
+        }
+    }
+
     /// Take the next frame to send.
     ///
     /// Named `take_next` rather than `next`: this is not an iterator, and a

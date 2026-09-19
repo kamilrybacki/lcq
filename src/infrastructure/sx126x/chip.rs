@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use lora_modulation::{Bandwidth, BaseBandModulationParams, CodingRate, SpreadingFactor};
 
 use crate::application::RadioEvent;
-use crate::infrastructure::hub::Delivery;
+use crate::infrastructure::hub::{Delivery, Verdict};
 
 // The opcodes the model acts on or answers. DS.SX1261-2 table 11-1; the values
 // are the datasheet's, not the driver's, so the model does not lean on the
@@ -65,6 +65,8 @@ pub const IRQ_RX_DONE: u16 = 0x0002;
 const IRQ_PREAMBLE_DETECTED: u16 = 0x0004;
 const IRQ_SYNCWORD_VALID: u16 = 0x0008;
 const IRQ_HEADER_VALID: u16 = 0x0010;
+/// `HeaderErr`: a frame was heard and its header failed its CRC.
+pub const IRQ_HEADER_ERR: u16 = 0x0020;
 /// `CrcErr`: the frame that arrived failed its CRC.
 pub const IRQ_CRC_ERR: u16 = 0x0040;
 /// `CadDone`: channel activity detection finished.
@@ -129,6 +131,8 @@ pub struct Counters {
     pub received: u32,
     /// Frames received with a CRC failure.
     pub crc_errors: u32,
+    /// Frames heard whose header failed its CRC.
+    pub header_errors: u32,
     /// Frames that ended while the chip was transmitting.
     pub missed_transmitting: u32,
     /// Frames that ended while the chip was in standby or asleep.
@@ -681,6 +685,16 @@ impl Chip {
             )));
             return;
         }
+        model.rssi_raw = rssi_raw(delivery.rssi_dbm);
+        model.snr_raw = snr_raw(delivery.snr_db);
+        if delivery.verdict == Verdict::HeaderError {
+            // Heard, never received: the chip says so and keeps listening.
+            model.raise(IRQ_PREAMBLE_DETECTED | IRQ_SYNCWORD_VALID | IRQ_HEADER_ERR);
+            model.counters.header_errors += 1;
+            drop(model);
+            self.inner.wake.notify_all();
+            return;
+        }
         let length = u8::try_from(delivery.bytes.len().min(u8::MAX as usize)).unwrap_or(u8::MAX);
         let base = usize::from(model.rx_base);
         for (offset, byte) in delivery.bytes.iter().take(usize::from(length)).enumerate() {
@@ -688,10 +702,8 @@ impl Chip {
         }
         model.rx_len = length;
         model.rx_offset = model.rx_base;
-        model.rssi_raw = rssi_raw(delivery.rssi_dbm);
-        model.snr_raw = snr_raw(delivery.snr_db);
         let mut flags = IRQ_PREAMBLE_DETECTED | IRQ_SYNCWORD_VALID | IRQ_HEADER_VALID | IRQ_RX_DONE;
-        if delivery.crc_ok {
+        if delivery.verdict == Verdict::Decoded {
             model.counters.received += 1;
         } else {
             flags |= IRQ_CRC_ERR;

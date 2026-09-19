@@ -1150,4 +1150,46 @@ container harness reads them, and the virtual-fleet test asserts that no chip
 missed a frame and no CRC failure occurred on a clean channel. Own-vote
 resends in a repair round now ride `RadioQueue` in the distress class, ahead
 of carried votes in the routine class -- the queue decides the order, not an
-ad hoc flag -- which is the first use of the class M5 reserved.
+ad hoc flag -- which is the first use of the class M5 reserved. The queue's dedup memory would have refused the same
+frame in the next repair round; a repair request now forgets it first, because
+being asked again means the frame is still lacking.
+
+---
+
+## D19 — The medium is judged in time: no lock, header lost, payload lost
+
+**Decided and implemented 2026-09-19**, from Hermes's review of D16.
+
+D14's rule was that any overlap in time is a collision unless one frame is
+six decibels stronger, whenever the other arrives. A receiver does not work
+like that. It locks onto a frame during the last symbols of the preamble;
+before that window an interferer that has already ended never mattered, and
+after it an interferer cannot take the lock away -- it corrupts what is being
+received. `sim::medium::judge` now tells five outcomes apart, and the hub
+delivers accordingly:
+
+- **too weak** — below sensitivity, nothing heard;
+- **no lock** — an interferer not enough weaker was on the air during the
+  symbols a lock needs (the profile's `preamble_symbols_to_lock`, ending with
+  the sync word): the receiver never had the frame, and the hub sends nothing;
+- **header error** — locked, then an interferer arrived over the header's
+  eight symbols: the chip raises `HeaderErr` and no `RxDone`; the hub delivers
+  an empty frame with that verdict; the chip model raises exactly that IRQ
+  and the node meters it as `header_errors`;
+- **CRC error** — locked, then an interferer arrived over the payload: the
+  bytes are noise, delivered with the verdict `CrcError`, raised as
+  `RxDone | CrcErr`;
+- **decoded**.
+
+A frame stronger than an interferer by the profile's capture threshold is
+decoded whenever the interferer arrives; a receiver's own transmission is an
+interferer of infinite strength, which is how half-duplex falls out of the
+same rule. This is `LoRaSim`'s timing rule (the last five preamble symbols;
+here six, conservative) with the header told apart from the payload. The
+thresholds are the profile's, not truths about a chip: the hardware matrix
+in the handoff -- power difference by arrival offset by overlap length --
+calibrates them.
+
+Rules out: a capture rule without a clock, and a collision that is silent to
+the receiver when a real chip would have raised an IRQ. Revisit when hardware
+measurements say the lock window or the header window is elsewhere.

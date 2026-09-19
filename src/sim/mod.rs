@@ -39,8 +39,8 @@ mod scenario;
 
 pub use channel::{DEFAULT_SPREADING_FACTOR, Topology, airtime_ms, airtime_ms_at};
 pub use medium::{
-    CAPTURE_THRESHOLD_DB, DUTY_CYCLE_BUDGET_MS, Reception, Transmission, capture_wins,
-    duty_cycle_ok, receive,
+    Acquisition, CAPTURE_THRESHOLD_DB, DUTY_CYCLE_BUDGET_MS, Reception, Transmission, capture_wins,
+    duty_cycle_ok, judge, receive,
 };
 pub use phy::{
     ANTENNA_GAIN_DBI, CARRIER_HZ, Link, MAST_HEIGHT_M, MAX_FADE_DB, MIN_FADE_DB, NOISE_FLOOR_DBM,

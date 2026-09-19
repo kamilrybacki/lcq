@@ -49,6 +49,9 @@ impl ErrorType for VirtualSpi {
     type Error = SpiFault;
 }
 
+// The trait's functions are `async`; the model answers at once, so nothing
+// in them awaits. Clippy 1.98 flags that; it is the point of the virtual bus.
+#[allow(unknown_lints, clippy::unused_async_trait_impl)]
 impl SpiDevice for VirtualSpi {
     async fn transaction(&mut self, operations: &mut [Operation<'_, u8>]) -> Result<(), SpiFault> {
         let mut command: Vec<u8> = Vec::new();
@@ -95,6 +98,7 @@ impl VirtualIv {
     }
 }
 
+#[allow(unknown_lints, clippy::unused_async_trait_impl)]
 impl InterfaceVariant for VirtualIv {
     async fn reset(&mut self, _delay: &mut impl DelayNs) -> Result<(), RadioError> {
         self.chip.reset();
@@ -128,6 +132,7 @@ impl InterfaceVariant for VirtualIv {
 /// around reset and sleep, which no time scale needs to compress.
 pub struct HostDelay;
 
+#[allow(unknown_lints, clippy::unused_async_trait_impl)]
 impl DelayNs for HostDelay {
     async fn delay_ns(&mut self, ns: u32) {
         thread::sleep(Duration::from_nanos(u64::from(ns)));

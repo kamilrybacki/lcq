@@ -115,6 +115,12 @@ pub enum RadioEvent {
         /// Received signal strength in dBm of the garbled frame.
         rssi_dbm: i16,
     },
+    /// A frame's header failed its CRC: somebody spoke, and not even its
+    /// length survived.
+    HeaderError {
+        /// Received signal strength in dBm.
+        rssi_dbm: i16,
+    },
     /// A diagnostic from the adapter: the body of a JSON object, for the
     /// node's log.
     Note(String),

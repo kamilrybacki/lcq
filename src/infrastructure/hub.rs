@@ -17,7 +17,7 @@ use std::time::Duration;
 /// The largest frame the socket will read; anything bigger is a broken peer.
 pub const MAX_SOCKET_FRAME_BYTES: usize = 4096;
 /// First byte of every delivery: the format version.
-pub const DELIVERY_TAG: u8 = 0x01;
+pub const DELIVERY_TAG: u8 = 0x02;
 /// Bytes before the payload in an encoded delivery.
 pub const DELIVERY_HEADER_BYTES: usize = 9;
 
@@ -25,10 +25,41 @@ pub const DELIVERY_HEADER_BYTES: usize = 9;
 const CONNECT_ATTEMPTS: u32 = 300;
 const CONNECT_PAUSE: Duration = Duration::from_millis(100);
 
+/// What a receiver made of a frame it locked onto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Intact.
+    Decoded,
+    /// The header failed its CRC: nothing was received, only heard.
+    HeaderError,
+    /// The payload failed its CRC: the bytes are noise.
+    CrcError,
+}
+
+impl Verdict {
+    const fn byte(self) -> u8 {
+        match self {
+            Self::Decoded => 0,
+            Self::HeaderError => 1,
+            Self::CrcError => 2,
+        }
+    }
+
+    const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Decoded),
+            1 => Some(Self::HeaderError),
+            2 => Some(Self::CrcError),
+            _ => None,
+        }
+    }
+}
+
 /// What the medium handed one receiver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delivery {
-    /// The payload as this receiver got it -- garbled when `crc_ok` is false.
+    /// The payload as this receiver got it -- garbled unless the verdict is
+    /// `Decoded`, empty for a header error.
     pub bytes: Vec<u8>,
     /// Received power in dBm.
     pub rssi_dbm: i16,
@@ -36,12 +67,12 @@ pub struct Delivery {
     pub snr_db: i8,
     /// How long the frame occupied the channel, in (scaled) milliseconds.
     pub airtime_ms: u32,
-    /// Whether the frame survived: false means the receiver saw a CRC failure.
-    pub crc_ok: bool,
+    /// What the receiver made of it.
+    pub verdict: Verdict,
 }
 
 impl Delivery {
-    /// The wire form: tag, RSSI, SNR, airtime, CRC flag, payload.
+    /// The wire form: tag, RSSI, SNR, airtime, verdict, payload.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(DELIVERY_HEADER_BYTES + self.bytes.len());
@@ -49,7 +80,7 @@ impl Delivery {
         out.extend_from_slice(&self.rssi_dbm.to_le_bytes());
         out.push(self.snr_db.to_le_bytes()[0]);
         out.extend_from_slice(&self.airtime_ms.to_le_bytes());
-        out.push(u8::from(self.crc_ok));
+        out.push(self.verdict.byte());
         out.extend_from_slice(&self.bytes);
         out
     }
@@ -63,17 +94,13 @@ impl Delivery {
         let rssi_dbm = i16::from_le_bytes([encoded[1], encoded[2]]);
         let snr_db = i8::from_le_bytes([encoded[3]]);
         let airtime_ms = u32::from_le_bytes([encoded[4], encoded[5], encoded[6], encoded[7]]);
-        let crc_ok = match encoded[8] {
-            0 => false,
-            1 => true,
-            _ => return None,
-        };
+        let verdict = Verdict::from_byte(encoded[8])?;
         Some(Self {
             bytes: encoded[DELIVERY_HEADER_BYTES..].to_vec(),
             rssi_dbm,
             snr_db,
             airtime_ms,
-            crc_ok,
+            verdict,
         })
     }
 }

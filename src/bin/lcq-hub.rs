@@ -22,8 +22,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lcq::application::PhyProfile;
-use lcq::infrastructure::hub::{Delivery, write_delivery};
-use lcq::sim::{Link, SENSITIVITY_DBM, TX_POWER_DBM, airtime_ms, capture_wins, rssi_dbm, snr_db};
+use lcq::infrastructure::hub::{Delivery, Verdict, write_delivery};
+use lcq::sim::{
+    Acquisition, Link, Reception, TX_POWER_DBM, Transmission, airtime_ms, judge, rssi_dbm, snr_db,
+};
 use lcq::wire::peek_frame_header;
 
 /// One frame arriving from a node.
@@ -50,7 +52,7 @@ struct InFlight {
 const GARBLE: u8 = 0xA5;
 
 /// What one receiver gets: the frame as sent, or its wreck.
-fn delivery(frame: &InFlight, power: f64, intact: bool) -> Delivery {
+fn delivery(frame: &InFlight, power: f64, verdict: Verdict) -> Delivery {
     #[allow(clippy::cast_possible_truncation)]
     let rssi_dbm = power.round().clamp(-300.0, 100.0) as i16;
     #[allow(clippy::cast_possible_truncation)]
@@ -62,17 +64,17 @@ fn delivery(frame: &InFlight, power: f64, intact: bool) -> Delivery {
             .as_millis(),
     )
     .unwrap_or(u32::MAX);
-    let bytes = if intact {
-        frame.bytes.clone()
-    } else {
-        frame.bytes.iter().map(|byte| byte ^ GARBLE).collect()
+    let bytes = match verdict {
+        Verdict::Decoded => frame.bytes.clone(),
+        Verdict::CrcError => frame.bytes.iter().map(|byte| byte ^ GARBLE).collect(),
+        Verdict::HeaderError => Vec::new(),
     };
     Delivery {
         bytes,
         rssi_dbm,
         snr_db: snr,
         airtime_ms,
-        crc_ok: intact,
+        verdict,
     }
 }
 
@@ -226,6 +228,19 @@ fn settle(
     seed: &mut u64,
 ) {
     let frame = &frames[index];
+    // The medium model times frames in milliseconds from some origin; the
+    // earliest frame still remembered will do, and the timing is the
+    // profile's, compressed as this run compresses time.
+    let origin = frames
+        .iter()
+        .map(|f| f.starts_at)
+        .min()
+        .unwrap_or(frame.starts_at);
+    let ms = |at: Instant| {
+        u64::try_from(at.saturating_duration_since(origin).as_millis()).unwrap_or(u64::MAX)
+    };
+    let acquisition = Acquisition::default_profile().scaled(options.scale);
+    let airtime = ms(frame.ends_at).saturating_sub(ms(frame.starts_at));
     let overlappers: Vec<&InFlight> = frames
         .iter()
         .enumerate()
@@ -241,24 +256,55 @@ fn settle(
             continue;
         }
         let power = options.rssi(frame.from, target);
-        if power < SENSITIVITY_DBM {
+        let heard = Transmission::new(ms(frame.starts_at), airtime, power);
+        let others: Vec<Transmission> = overlappers
+            .iter()
+            .filter(|o| options.reaches(o.from, target))
+            .map(|o| {
+                let start = ms(o.starts_at);
+                let air = ms(o.ends_at).saturating_sub(start);
+                if o.from == target {
+                    // Its own frame: nothing is heard over it.
+                    Transmission::own_transmission(start, air)
+                } else {
+                    Transmission::new(start, air, options.rssi(o.from, target))
+                }
+            })
+            .collect();
+        let verdict = match judge(&heard, &others, &acquisition) {
+            Reception::TooWeak => {
+                options.log(&format!(
+                    "{{\"event\":\"lost\",\"from\":{},\"to\":{target},\"why\":\"weak\",\"rssi\":{power:.1}}}",
+                    frame.from
+                ));
+                continue;
+            }
+            Reception::NoLock => {
+                options.log(&format!(
+                    "{{\"event\":\"collision\",\"a\":{},\"b\":{},\"at\":{target},\"why\":\"no_lock\"}}",
+                    frame.from,
+                    first_interferer(&overlappers, target, options)
+                ));
+                continue;
+            }
+            Reception::HeaderError => Verdict::HeaderError,
+            Reception::CrcError => Verdict::CrcError,
+            Reception::Decoded => Verdict::Decoded,
+        };
+        if verdict != Verdict::Decoded {
+            // Locked, then lost: a real chip raises HeaderErr or RxDone with
+            // CrcErr, and a node may count that as evidence of a voice.
             options.log(&format!(
-                "{{\"event\":\"lost\",\"from\":{},\"to\":{target},\"why\":\"weak\",\"rssi\":{power:.1}}}",
-                frame.from
+                "{{\"event\":\"collision\",\"a\":{},\"b\":{},\"at\":{target},\"why\":\"{}\"}}",
+                frame.from,
+                first_interferer(&overlappers, target, options),
+                match verdict {
+                    Verdict::HeaderError => "header",
+                    _ => "crc",
+                }
             ));
-            continue;
-        }
-        if let Some(other) = overlappers.iter().find(|o| {
-            options.reaches(o.from, target) && !capture_wins(power, options.rssi(o.from, target))
-        }) {
-            options.log(&format!(
-                "{{\"event\":\"collision\",\"a\":{},\"b\":{},\"at\":{target}}}",
-                frame.from, other.from
-            ));
-            // The receiver heard *something*: a real chip raises RxDone with
-            // a CRC failure, and a node may count that as evidence of a voice.
             if let Some(stream) = guard.get_mut(&target) {
-                let _ = write_delivery(stream, &delivery(frame, power, false));
+                let _ = write_delivery(stream, &delivery(frame, power, verdict));
             }
             continue;
         }
@@ -270,7 +316,7 @@ fn settle(
             continue;
         }
         if let Some(stream) = guard.get_mut(&target)
-            && write_delivery(stream, &delivery(frame, power, true)).is_ok()
+            && write_delivery(stream, &delivery(frame, power, Verdict::Decoded)).is_ok()
         {
             delivered_to += 1;
         }
@@ -288,6 +334,15 @@ fn settle(
             frame.bytes.len()
         ));
     }
+}
+
+/// The member whose frame a receiver heard over this one, for the log: the
+/// first overlapper that reaches the receiver.
+fn first_interferer(overlappers: &[&InFlight], target: usize, options: &Options) -> usize {
+    overlappers
+        .iter()
+        .find(|o| options.reaches(o.from, target))
+        .map_or(usize::MAX, |o| o.from)
 }
 
 fn next_f64(seed: &mut u64) -> f64 {

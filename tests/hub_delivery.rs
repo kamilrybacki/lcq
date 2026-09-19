@@ -1,6 +1,6 @@
 //! The frame the hub hands a receiver survives the wire unchanged.
 
-use lcq::infrastructure::hub::{DELIVERY_HEADER_BYTES, Delivery};
+use lcq::infrastructure::hub::{DELIVERY_HEADER_BYTES, Delivery, Verdict};
 
 #[test]
 fn a_delivery_round_trips() {
@@ -9,7 +9,7 @@ fn a_delivery_round_trips() {
         rssi_dbm: -131,
         snr_db: -14,
         airtime_ms: 1313,
-        crc_ok: true,
+        verdict: Verdict::Decoded,
     };
     let encoded = delivery.encode();
     assert_eq!(encoded.len(), DELIVERY_HEADER_BYTES + 4);
@@ -23,7 +23,7 @@ fn a_wreck_keeps_its_flag() {
         rssi_dbm: -80,
         snr_db: 12,
         airtime_ms: 5,
-        crc_ok: false,
+        verdict: Verdict::CrcError,
     };
     assert_eq!(Delivery::decode(&delivery.encode()), Some(delivery));
 }
@@ -31,13 +31,13 @@ fn a_wreck_keeps_its_flag() {
 #[test]
 fn garbage_is_not_a_delivery() {
     assert_eq!(Delivery::decode(&[]), None);
-    assert_eq!(Delivery::decode(&[0x02; 12]), None, "unknown tag");
+    assert_eq!(Delivery::decode(&[0x7F; 12]), None, "unknown tag");
     let mut bad_flag = Delivery {
         bytes: vec![],
         rssi_dbm: 0,
         snr_db: 0,
         airtime_ms: 0,
-        crc_ok: true,
+        verdict: Verdict::HeaderError,
     }
     .encode();
     bad_flag[8] = 7;

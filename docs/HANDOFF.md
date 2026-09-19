@@ -301,6 +301,27 @@ the assertion sat at its own expected value (26 replays, 27 drops in one run,
 it delivers, and the test compares drops with replays *delivered* -- the
 property it always meant: no receiver verifies a frame it already had.
 
+### The medium judged in time, and what the meters caught (D17–D19)
+
+Replay windows per sender, a frozen and versioned PHY profile with contract
+vectors, meters in the node's final report, and the medium judged in time:
+`sim::medium::judge` tells no-lock from header loss from payload loss, the
+hub delivers accordingly (a header error as `HeaderErr` with no bytes, a
+payload error as garbled bytes with `CrcErr`, no lock as silence), and the
+virtual chip raises exactly those IRQs. GitHub Actions runs fmt, clippy and
+every non-container test on every push.
+
+The meters paid for themselves at once. The first full run on the virtual
+chips failed the replay-adversary test: the replayer itself ended with three
+supporters of four. Its `chip_missed` counter said why -- deaf while
+transmitting its replays, seven frames -- and its honest neighbours' repair
+resends should have covered that but did not: own-vote resends had moved
+onto `RadioQueue` in the distress class, and the queue's dedup memory refused
+the same frame in the next repair round. `RadioQueue::forget` on every
+repair request fixed it (a request says the frame is still lacking), and the
+test passes deterministically again: 26 replays, 36 delivered, 49 dropped,
+every member at quorum. Gate on both radios: hub 20 of 20 in 640 s, virtual SX1262 20 of 20 in 631 s.
+
 ### What to pick up next
 
 1. **Hardware qualification** (roadmap M8): the virtual module passes the

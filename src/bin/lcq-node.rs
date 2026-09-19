@@ -891,8 +891,11 @@ fn main() {
                             let Ok((_, sequence)) = peek_frame_header(bytes) else {
                                 continue;
                             };
-                            let frame =
-                                OutgoingFrame::new(bytes.to_vec(), forward_key(held, sequence));
+                            // Asked for again means still lacking: a frame
+                            // carried in an earlier round may be carried again.
+                            let key = forward_key(held, sequence);
+                            forwards.forget(key);
+                            let frame = OutgoingFrame::new(bytes.to_vec(), key);
                             if forwards.offer(frame, Priority::Routine).is_ok() {
                                 queued += 1;
                             }
@@ -904,10 +907,9 @@ fn main() {
                         && let Some(again) = journal.pending().next()
                         && let Ok((_, sequence)) = peek_frame_header(again.bytes())
                     {
-                        let own = OutgoingFrame::new(
-                            again.bytes().to_vec(),
-                            forward_key(options.index, sequence),
-                        );
+                        let key = forward_key(options.index, sequence);
+                        forwards.forget(key);
+                        let own = OutgoingFrame::new(again.bytes().to_vec(), key);
                         if forwards.offer(own, Priority::Distress).is_ok() {
                             queued += 1;
                         }
@@ -1024,7 +1026,7 @@ fn main() {
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
+            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"header_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
             options.index,
             supporters.len(),
             policy.min_signers(),
@@ -1032,6 +1034,7 @@ fn main() {
             attempts[2],
             METER.verifications.load(Ordering::Relaxed),
             METER.crc_errors.load(Ordering::Relaxed),
+            METER.header_errors.load(Ordering::Relaxed),
             METER.chip_missed.load(Ordering::Relaxed),
             METER.replays_dropped.load(Ordering::Relaxed),
             budget.used_ms(
@@ -1295,6 +1298,7 @@ fn is_replay(frame: &[u8], windows: &[ReplayWindow]) -> bool {
 struct Meter {
     verifications: AtomicU64,
     crc_errors: AtomicU64,
+    header_errors: AtomicU64,
     chip_missed: AtomicU64,
     replays_dropped: AtomicU64,
 }
@@ -1302,6 +1306,7 @@ struct Meter {
 static METER: Meter = Meter {
     verifications: AtomicU64::new(0),
     crc_errors: AtomicU64::new(0),
+    header_errors: AtomicU64::new(0),
     chip_missed: AtomicU64::new(0),
     replays_dropped: AtomicU64::new(0),
 };
@@ -1563,6 +1568,14 @@ fn receive(radio: &mut dyn Radio, options: &Options, clock: &impl Clock) -> Opti
                     options,
                     clock,
                     &format!("{{\"event\":\"crc_error\",\"rssi\":{rssi_dbm}}}"),
+                );
+            }
+            RadioEvent::HeaderError { rssi_dbm } => {
+                bump(&METER.header_errors);
+                report(
+                    options,
+                    clock,
+                    &format!("{{\"event\":\"header_error\",\"rssi\":{rssi_dbm}}}"),
                 );
             }
             RadioEvent::Note(body) => {

@@ -1,8 +1,9 @@
 //! Propagation, collisions, capture and duty cycle.
 
 use lcq::sim::{
-    CAPTURE_THRESHOLD_DB, DUTY_CYCLE_BUDGET_MS, Link, Reception, RicianFading, SENSITIVITY_DBM,
-    Transmission, capture_wins, duty_cycle_ok, path_loss_db, radio_horizon_m, receive, rssi_dbm,
+    Acquisition, CAPTURE_THRESHOLD_DB, DUTY_CYCLE_BUDGET_MS, Link, Reception, RicianFading,
+    SENSITIVITY_DBM, Transmission, capture_wins, duty_cycle_ok, judge, path_loss_db,
+    radio_horizon_m, receive, rssi_dbm,
 };
 
 /// Free space spreads over a sphere: doubling the distance costs 6 dB.
@@ -110,7 +111,99 @@ fn the_stronger_signal_captures_when_it_is_far_enough_ahead() {
 fn overlapping_frames_of_similar_strength_destroy_each_other() {
     let target = Transmission::new(0, 1_000, -100.0);
     let clash = Transmission::new(500, 1_000, -101.0);
-    assert_eq!(receive(&target, &[clash]), Reception::Collided);
+    // The receiver had locked onto the first frame long before the second
+    // arrived over its payload: heard, and lost to the CRC.
+    assert_eq!(receive(&target, &[clash]), Reception::CrcError);
+    // The second frame's preamble arrived while the first was on the air:
+    // never locked, never heard.
+    assert_eq!(receive(&clash, &[target]), Reception::NoLock);
+}
+
+/// A moment `symbols` symbols in, as the whole milliseconds transmissions are
+/// timed in.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn at(symbols: f64, symbol_ms: f64) -> u64 {
+    (symbols * symbol_ms) as u64
+}
+
+#[test]
+fn an_interferer_that_ends_before_the_lock_window_opens_never_mattered() {
+    let acquisition = Acquisition::default_profile();
+    let symbol = acquisition.symbol_ms();
+    // The lock window opens two symbols in (eight preamble symbols, six
+    // needed). An interferer gone before that is LoRaSim's rule: harmless.
+    let target = Transmission::new(100, 1_000, -100.0);
+    let gone_in_time = Transmission::new(0, 100 + at(1.5, symbol), -100.0);
+    assert_eq!(
+        judge(&target, &[gone_in_time], &acquisition),
+        Reception::Decoded
+    );
+    let one_symbol_too_long = Transmission::new(0, 100 + at(2.5, symbol), -100.0);
+    assert_eq!(
+        judge(&target, &[one_symbol_too_long], &acquisition),
+        Reception::NoLock
+    );
+}
+
+#[test]
+fn an_interferer_over_the_header_is_a_header_error_and_later_a_crc_error() {
+    let acquisition = Acquisition::default_profile();
+    let symbol = acquisition.symbol_ms();
+    let target = Transmission::new(0, 2_000, -100.0);
+    // Locked after the sync word: 12.25 symbols. The header is the next 8.
+    let over_the_header = Transmission::new(at(14.0, symbol), 500, -100.0);
+    assert_eq!(
+        judge(&target, &[over_the_header], &acquisition),
+        Reception::HeaderError
+    );
+    let over_the_payload = Transmission::new(at(30.0, symbol), 500, -100.0);
+    assert_eq!(
+        judge(&target, &[over_the_payload], &acquisition),
+        Reception::CrcError
+    );
+    // The worst overlap decides.
+    assert_eq!(
+        judge(&target, &[over_the_payload, over_the_header], &acquisition),
+        Reception::HeaderError
+    );
+}
+
+#[test]
+fn a_captured_frame_is_decoded_whenever_the_interferer_arrives() {
+    let acquisition = Acquisition::default_profile();
+    let symbol = acquisition.symbol_ms();
+    let target = Transmission::new(0, 2_000, -90.0);
+    for start in [0u64, at(1.0, symbol), at(14.0, symbol), 1_500] {
+        let weak = Transmission::new(start, 500, -90.0 - CAPTURE_THRESHOLD_DB);
+        assert_eq!(
+            judge(&target, &[weak], &acquisition),
+            Reception::Decoded,
+            "at {start} ms"
+        );
+    }
+}
+
+#[test]
+fn compressed_time_compresses_the_lock_window() {
+    let full = Acquisition::default_profile();
+    let compressed = full.scaled(100);
+    assert!((compressed.symbol_ms() * 100.0 - full.symbol_ms()).abs() < 1e-9);
+    // 500 ms in is over the payload at full speed and over nothing at all
+    // once the whole frame is 20 ms long.
+    let target = Transmission::new(0, 20, -100.0);
+    let later = Transmission::new(500, 20, -100.0);
+    assert_eq!(judge(&target, &[later], &compressed), Reception::Decoded);
+}
+
+#[test]
+fn a_reception_knows_whether_anything_was_heard() {
+    assert!(Reception::Decoded.decoded());
+    assert!(Reception::Decoded.locked());
+    assert!(!Reception::CrcError.decoded());
+    assert!(Reception::CrcError.locked());
+    assert!(Reception::HeaderError.locked());
+    assert!(!Reception::NoLock.locked());
+    assert!(!Reception::TooWeak.locked());
 }
 
 #[test]
@@ -138,8 +231,13 @@ fn a_receiver_is_deaf_while_its_own_radio_transmits() {
     // Half duplex. One antenna, one chain: a node cannot hear the fleet answer
     // while it is still answering itself.
     let target = Transmission::new(0, 1_000, -60.0);
-    let own = Transmission::own_transmission(500, 1_000);
-    assert_eq!(receive(&target, &[own]), Reception::Collided);
+    // Transmitting from the start: the preamble is never heard.
+    let from_the_start = Transmission::own_transmission(0, 1_000);
+    assert_eq!(receive(&target, &[from_the_start]), Reception::NoLock);
+    // Transmitting after the lock: the frame was heard and is lost.
+    let halfway = Transmission::own_transmission(500, 1_000);
+    assert_eq!(receive(&target, &[halfway]), Reception::CrcError);
+    assert!(!receive(&target, &[halfway]).decoded());
 }
 
 #[test]

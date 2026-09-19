@@ -574,7 +574,7 @@ impl<'a> Run<'a> {
                 .filter_map(|(other, frame)| (other != index).then_some(*frame))
                 .collect();
             let outcome = match receive(frame, &others) {
-                Reception::Collided => {
+                Reception::NoLock | Reception::HeaderError | Reception::CrcError => {
                     self.tally.collided += 1;
                     retry.push(*sender);
                     Outcome::Collided

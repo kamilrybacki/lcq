@@ -7,9 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lcq::application::RadioEvent;
-use lcq::infrastructure::hub::Delivery;
+use lcq::infrastructure::hub::{Delivery, Verdict};
 use lcq::infrastructure::sx126x::{
-    Chip, ChipMode, HostDelay, IRQ_CRC_ERR, IRQ_RX_DONE, VirtualIv, VirtualSpi, block_on,
+    Chip, ChipMode, HostDelay, IRQ_CRC_ERR, IRQ_HEADER_ERR, IRQ_RX_DONE, VirtualIv, VirtualSpi,
+    block_on,
 };
 use lora_modulation::{Bandwidth, CodingRate, SpreadingFactor};
 use lora_phy::LoRa;
@@ -165,7 +166,11 @@ fn delivery(bytes: Vec<u8>, airtime_ms: u32, crc_ok: bool) -> Delivery {
         rssi_dbm: -90,
         snr_db: -7,
         airtime_ms,
-        crc_ok,
+        verdict: if crc_ok {
+            Verdict::Decoded
+        } else {
+            Verdict::CrcError
+        },
     }
 }
 
@@ -377,4 +382,27 @@ fn a_twelve_symbol_preamble_forgives_five_and_a_half_symbols_but_not_six_and_a_h
     let snapshot = bench.chip.snapshot();
     assert_eq!(snapshot.counters.missed_late, 1, "{snapshot:?}");
     assert_eq!(snapshot.counters.received, 1);
+}
+
+#[test]
+fn a_header_error_is_heard_but_nothing_is_received() {
+    let mut bench = bench(1);
+    bench.listen();
+    thread::sleep(Duration::from_millis(20));
+    bench.chip.deliver(&Delivery {
+        bytes: Vec::new(),
+        rssi_dbm: -95,
+        snr_db: -9,
+        airtime_ms: 10,
+        verdict: Verdict::HeaderError,
+    });
+    let irq = bench.chip.snapshot().irq_status;
+    assert_ne!(irq & IRQ_HEADER_ERR, 0, "HeaderErr is raised");
+    assert_eq!(irq & IRQ_RX_DONE, 0, "and RxDone is not");
+    // The driver reports nothing to hand up, and keeps listening.
+    assert!(bench.service().is_none());
+    let snapshot = bench.chip.snapshot();
+    assert_eq!(snapshot.counters.header_errors, 1);
+    assert_eq!(snapshot.counters.received, 0);
+    assert_eq!(snapshot.mode, ChipMode::Receive);
 }

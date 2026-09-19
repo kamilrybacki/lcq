@@ -2,7 +2,7 @@
 //! before D16, behind the seam it now shares with the virtual SX1262.
 
 use crate::application::{Radio, RadioError, RadioEvent, Received};
-use crate::infrastructure::hub::{HubError, HubSocket, MAX_SOCKET_FRAME_BYTES};
+use crate::infrastructure::hub::{HubError, HubSocket, MAX_SOCKET_FRAME_BYTES, Verdict};
 
 /// A node attached straight to `lcq-hub`.
 ///
@@ -41,16 +41,18 @@ impl Radio for HubRadio {
 
     fn poll(&mut self) -> Option<RadioEvent> {
         let delivery = self.socket.poll()?;
-        Some(if delivery.crc_ok {
-            RadioEvent::Received(Received {
+        Some(match delivery.verdict {
+            Verdict::Decoded => RadioEvent::Received(Received {
                 bytes: delivery.bytes,
                 rssi_dbm: delivery.rssi_dbm,
                 snr_db: delivery.snr_db,
-            })
-        } else {
-            RadioEvent::CrcError {
+            }),
+            Verdict::HeaderError => RadioEvent::HeaderError {
                 rssi_dbm: delivery.rssi_dbm,
-            }
+            },
+            Verdict::CrcError => RadioEvent::CrcError {
+                rssi_dbm: delivery.rssi_dbm,
+            },
         })
     }
 }

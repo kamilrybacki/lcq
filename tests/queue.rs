@@ -120,3 +120,22 @@ fn draining_an_empty_queue_yields_nothing() {
     let mut queue = RadioQueue::with_capacity(4, 10_000);
     assert!(queue.take_next().is_none());
 }
+
+#[test]
+fn a_forgotten_frame_can_be_offered_again() {
+    let mut queue = RadioQueue::with_capacity(4, 4_096);
+    let frame = || OutgoingFrame::new(vec![1, 2, 3], 77);
+    assert!(queue.offer(frame(), Priority::Distress).is_ok());
+    assert!(queue.take_next().is_some());
+    assert_eq!(
+        queue.offer(frame(), Priority::Distress),
+        Err(QueueError::Duplicate),
+        "the dedup memory holds"
+    );
+    queue.forget(77);
+    assert!(
+        queue.offer(frame(), Priority::Distress).is_ok(),
+        "asked for again, carried again"
+    );
+    assert_eq!(queue.seen_count(), 1);
+}

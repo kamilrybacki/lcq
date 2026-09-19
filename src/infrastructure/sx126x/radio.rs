@@ -19,7 +19,7 @@ use lora_phy::mod_traits::IrqState;
 use lora_phy::sx126x::{Config, Sx126x, Sx1262};
 
 use super::bus::{HostDelay, VirtualIv, VirtualSpi};
-use super::chip::{Chip, IRQ_CRC_ERR};
+use super::chip::{Chip, IRQ_CRC_ERR, IRQ_HEADER_ERR};
 use super::executor::block_on;
 use crate::application::{PhyProfile, Radio, RadioError, RadioEvent, Received};
 use crate::infrastructure::hub::{HubError, HubSocket};
@@ -347,6 +347,13 @@ impl Driver {
                 let _ = block_on(self.lora.clear_irq_status());
             }
             Ok(Some(IrqState::PreambleReceived) | None) => {
+                // The driver says nothing about a header error; the chip's
+                // IRQ status does, and the packet status carries its strength.
+                if chip.snapshot().irq_status & IRQ_HEADER_ERR != 0 {
+                    let rssi_dbm = block_on(self.lora.get_rx_result(&self.rx_params, buffer))
+                        .map_or(0, |(_, status)| status.rssi);
+                    let _ = events.send(RadioEvent::HeaderError { rssi_dbm });
+                }
                 let _ = block_on(self.lora.clear_irq_status());
             }
             Err(DriverError::ReceiveTimeout) => {
