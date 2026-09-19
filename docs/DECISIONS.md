@@ -509,3 +509,34 @@ loopback, so every link is perfect and equally strong — there is no capture
 effect to be had, and the propagation model of `sim::phy` is not in the path.
 Nodes send once per stage: there is no retry policy here, because without an
 acknowledgement on the air there is nothing to retry against (D4).
+
+### Addendum: one container per vessel
+
+`tests/containers.rs` takes the same protocol a step further: each member is a
+container with its own root filesystem, its own network namespace and a journal
+on a mount no other member can see. The harness drives Docker from code --
+builds the image, launches the ships, sinks them, refloats them, tears it all
+down. There is no compose file and no Dockerfile: the binaries are statically
+linked, so `docker import` turns a tarball straight into an image and the whole
+vessel is two files and a kernel.
+
+Twelve vessels finish in the same wall-clock time as five, which is the property
+worth having: a slotted round grows linearly with the fleet while the
+deliberation window does not grow at all, so **members cost airtime, not delay**.
+
+Three things the containers forced that processes on one host did not:
+
+* **A round cannot be opened on a timer.** The harness launches every vessel but
+  the opener, waits for each to report itself listening, and only then launches
+  the one that opens the round. A fixed delay is a guess about how long Docker
+  takes today, and a round opened while vessels are still starting is a round
+  opened for nobody.
+* **The case begins at the trigger, not at boot.** The protocol clock used to
+  start when the process did, so a vessel that waited ten seconds for the fleet
+  to assemble believed two hundred protocol seconds of deliberation had already
+  passed, and finished the whole thing before anybody spoke. The clock now
+  starts when the trigger does.
+* **A vessel that comes back after the round has closed does not invent a
+  verdict.** It recovers its lock, declines to decide again, and waits. The test
+  asserts the silence, because a refloated member announcing an outcome for a
+  round it missed would be exactly the fabrication this protocol forbids.

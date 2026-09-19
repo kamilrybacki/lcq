@@ -16,7 +16,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,10 +48,20 @@ const CONTENT_HASH: [u8; 32] = [0x22; 32];
 /// the scale.
 const TRIGGER_STAGE: u8 = 0;
 
+// A binary's entry point, and a linear one: open the journal, join the
+// channel, run the round, report. Splitting it further would move steps behind
+// names without making the order any easier to follow, and the order is the
+// thing a reader needs.
+#[allow(clippy::too_many_lines)]
 fn main() {
     let options = Options::from_args();
     let epoch = Timestamp::from_secs(options.epoch);
-    let clock = ScaledClock::new(epoch, options.scale, options.offset);
+    // Provisional, for the log lines before a round exists. The real one starts
+    // when the trigger does: a case begins when the frame that opens it goes on
+    // the air. Starting this clock at process start instead meant a vessel that
+    // waited for the fleet to assemble burned that wait as protocol time, and
+    // finished the whole deliberation before anybody had spoken.
+    let mut clock = ScaledClock::new(epoch, options.scale, options.offset);
 
     let subject = Subject::new("mission", "evt-1", 0, CONTENT_HASH, epoch).expect("valid subject");
     let keys: Vec<SigningKey> = (0..options.fleet)
@@ -77,6 +87,7 @@ fn main() {
         ),
     );
 
+    let started = Instant::now();
     let mut link = Link::connect(&options.hub, options.index);
     let mut sent = [false; 3];
     let mut closed = false;
@@ -111,8 +122,13 @@ fn main() {
     loop {
         let now = clock.now().as_secs().saturating_sub(options.epoch);
 
-        // The originator opens the round, then anchors on its own frame.
-        if began.is_none() && options.trigger {
+        // The originator opens the round, then anchors on its own frame. It
+        // waits first: a member that opens a round before the fleet is even
+        // listening has opened it for nobody.
+        if began.is_none()
+            && options.trigger
+            && started.elapsed() >= Duration::from_millis(options.trigger_delay_ms)
+        {
             let bytes = build_trigger(
                 &subject,
                 &keys[options.index],
@@ -129,6 +145,7 @@ fn main() {
                 let air = Duration::from_millis(clock.wall_ms(airtime_ms(bytes.len())));
                 link.send(&bytes);
                 began = Some(Instant::now() + air);
+                clock = ScaledClock::new(epoch, options.scale, options.offset);
                 report(
                     &options,
                     &clock,
@@ -139,15 +156,16 @@ fn main() {
         if began.is_none() {
             // Nothing to schedule against yet: the only thing worth doing is
             // listening for the frame that opens the round.
-            if let Some(frame) = link.poll() {
-                if is_trigger(&frame, &group) {
-                    began = Some(Instant::now());
-                    report(
-                        &options,
-                        &clock,
-                        "{\"event\":\"triggered\",\"by\":\"heard\"}",
-                    );
-                }
+            if let Some(frame) = link.poll()
+                && is_trigger(&frame, &group)
+            {
+                began = Some(Instant::now());
+                clock = ScaledClock::new(epoch, options.scale, options.offset);
+                report(
+                    &options,
+                    &clock,
+                    "{\"event\":\"triggered\",\"by\":\"heard\"}",
+                );
             }
             thread::sleep(Duration::from_millis(1));
             continue;
@@ -222,12 +240,12 @@ fn main() {
         // had theirs. Verifying a signature is not free, and a node that misses
         // its own slot because it was busy reading is a node that collides with
         // whoever comes next.
-        if let Some(frame) = link.poll() {
-            if !is_trigger(&frame, &group) {
-                admit(
-                    &frame, &subject, &manifest, &group, &mut case, &clock, &options,
-                );
-            }
+        if let Some(frame) = link.poll()
+            && !is_trigger(&frame, &group)
+        {
+            admit(
+                &frame, &subject, &manifest, &group, &mut case, &clock, &options,
+            );
         }
 
         if now >= finish {
@@ -398,7 +416,17 @@ struct Link {
 
 impl Link {
     fn connect(address: &str, index: usize) -> Self {
-        let mut stream = TcpStream::connect(address).expect("hub");
+        // A node may well be powered up before whatever carries its traffic is
+        // reachable, so connecting is retried rather than fatal.
+        let mut stream = None;
+        for _ in 0..300 {
+            if let Ok(socket) = TcpStream::connect(address) {
+                stream = Some(socket);
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let mut stream = stream.expect("hub never became reachable");
         stream
             .write_all(&u16::try_from(index).unwrap_or(0).to_le_bytes())
             .expect("handshake");
@@ -430,10 +458,7 @@ impl Link {
     }
 
     fn poll(&mut self) -> Option<Vec<u8>> {
-        match self.inbox.try_recv() {
-            Ok(bytes) => Some(bytes),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        self.inbox.try_recv().ok()
     }
 }
 
@@ -449,6 +474,7 @@ struct Options {
     slots: bool,
     guard_ms: u64,
     trigger: bool,
+    trigger_delay_ms: u64,
 }
 
 impl Options {
@@ -475,6 +501,9 @@ impl Options {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(200),
             trigger: args.iter().any(|a| a == "--trigger"),
+            trigger_delay_ms: value("--trigger-delay-ms")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 

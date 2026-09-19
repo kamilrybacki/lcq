@@ -10,7 +10,8 @@
 //! after a frame's airtime has elapsed is it handed to the other nodes.
 //!
 //! Usage:
-//! `lcq-hub --port 0 --fleet 10 --scale 100 [--loss 0.0] [--partition] [--quiet]`
+//! `lcq-hub [--bind 0.0.0.0] --port 0 --fleet 10 --scale 100 [--loss 0.0]
+//! [--partition] [--quiet]`
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -38,7 +39,7 @@ struct InFlight {
 
 fn main() {
     let options = Options::from_args();
-    let listener = TcpListener::bind(("127.0.0.1", options.port)).expect("bind");
+    let listener = TcpListener::bind((options.bind.as_str(), options.port)).expect("bind");
     let port = listener.local_addr().expect("addr").port();
     // Printed first and flushed, so a harness can read the port before the
     // nodes it is about to start need it.
@@ -208,6 +209,7 @@ fn next_f64(seed: &mut u64) -> f64 {
 
 /// How the emulator was configured.
 struct Options {
+    bind: String,
     port: u16,
     fleet: usize,
     scale: u32,
@@ -226,6 +228,9 @@ impl Options {
                 .cloned()
         };
         Self {
+            // Loopback by default, because a hub reachable from the network is
+            // a hub anyone can inject frames into.
+            bind: value("--bind").unwrap_or_else(|| "127.0.0.1".to_string()),
             port: value("--port").and_then(|v| v.parse().ok()).unwrap_or(0),
             fleet: value("--fleet").and_then(|v| v.parse().ok()).unwrap_or(5),
             scale: value("--scale").and_then(|v| v.parse().ok()).unwrap_or(100),
