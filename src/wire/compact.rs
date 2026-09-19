@@ -26,6 +26,27 @@ use crate::wire::crypto::{SigningKey, VerifyingKey, WireError};
 extern crate alloc;
 
 const COMPACT_DOMAIN: &[u8] = b"lcq-v1-compact";
+/// Domain of the case reference: what makes eight bytes of a hash a name.
+const CASE_DOMAIN: &[u8] = b"lcq-v1-case";
+
+/// Bytes of the case reference a frame carries instead of the content hash.
+pub const CASE_REFERENCE_BYTES: usize = 8;
+
+/// The short reference a frame carries for a case: the first eight bytes of
+/// a domain-separated hash of the content hash. A lookup key, not a
+/// commitment -- the signature covers the full hash, which the receiver
+/// reconstructs from the case it already holds, and a frame that names the
+/// wrong case simply fails to verify (D20).
+#[must_use]
+pub fn case_reference(content_hash: &[u8; 32]) -> [u8; CASE_REFERENCE_BYTES] {
+    let mut hasher = Blake2s256::new();
+    hasher.update(CASE_DOMAIN);
+    hasher.update(content_hash);
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut reference = [0u8; CASE_REFERENCE_BYTES];
+    reference.copy_from_slice(&digest[..CASE_REFERENCE_BYTES]);
+    reference
+}
 
 /// The widest frame this protocol puts on the air, in bytes, sealed and with
 /// its cleartext header.
@@ -35,8 +56,9 @@ const COMPACT_DOMAIN: &[u8] = b"lcq-v1-compact";
 /// field is added. This is a protocol constant, not an implementation figure:
 /// a sender whose frame exceeds it refuses to transmit rather than trusting the
 /// slot to stretch. Measured with every field at its maximum encoding and
-/// every acknowledgement bit set; see `tests/wire.rs`.
-pub const MAX_FRAME_BYTES: usize = 176;
+/// every acknowledgement bit set; see `tests/wire.rs`. Twenty-four bytes
+/// narrower since D20 replaced the content hash with a reference.
+pub const MAX_FRAME_BYTES: usize = 152;
 
 /// Which members the sender has heard, as one bit each.
 ///
@@ -179,7 +201,7 @@ pub struct CompactEnvelope {
     mission_epoch: u16,
     event: u32,
     revision: u16,
-    content_hash: [u8; 32],
+    case: [u8; CASE_REFERENCE_BYTES],
     started_at: u64,
     author_index: u16,
     stage: u8,
@@ -190,10 +212,11 @@ pub struct CompactEnvelope {
 }
 
 impl CompactEnvelope {
-    /// Build a compact envelope from manifest indices.
+    /// Build a compact envelope from manifest indices, naming the case by the
+    /// reference of its content hash.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
-    pub const fn new(
+    pub fn new(
         mission_epoch: u16,
         event: u32,
         revision: u16,
@@ -208,7 +231,7 @@ impl CompactEnvelope {
             mission_epoch,
             event,
             revision,
-            content_hash,
+            case: case_reference(&content_hash),
             started_at,
             author_index,
             stage,
@@ -260,10 +283,10 @@ impl CompactEnvelope {
         self.revision
     }
 
-    /// Hash of the claim's content.
+    /// The reference to the claim's content: [`case_reference`] of the hash.
     #[must_use]
-    pub const fn content_hash(&self) -> &[u8; 32] {
-        &self.content_hash
+    pub const fn case(&self) -> &[u8; CASE_REFERENCE_BYTES] {
+        &self.case
     }
 
     /// When the claim started, in seconds since the mission epoch.
@@ -307,7 +330,7 @@ impl CompactEnvelope {
     /// The bytes a signature covers, domain-separated from the readable form so
     /// a signature over one can never verify as the other.
     #[must_use]
-    pub fn transcript(&self) -> [u8; 32] {
+    pub fn transcript(&self, content_hash: &[u8; 32]) -> [u8; 32] {
         let mut hasher = Blake2s256::new();
         hasher.update(COMPACT_DOMAIN);
         hasher.update([self.stage]);
@@ -321,7 +344,11 @@ impl CompactEnvelope {
         // Signed, so a frame cannot be moved from the round it was cast in into
         // another one.
         hasher.update(self.round.bytes());
-        hasher.update(self.content_hash);
+        // The full hash of the case, which only the wire does not carry: the
+        // receiver supplies the one it holds, and a frame about another case
+        // fails right here.
+        hasher.update(content_hash);
+        hasher.update(self.case);
         hasher.update(self.started_at.to_be_bytes());
         hasher.update(self.author_index.to_be_bytes());
         hasher.update([self.verdict]);
@@ -329,10 +356,10 @@ impl CompactEnvelope {
         hasher.finalize().into()
     }
 
-    /// Sign it.
+    /// Sign it, over the full content hash of the case it is about.
     #[must_use]
-    pub fn sign(self, key: &SigningKey) -> SignedCompactEnvelope {
-        let signature = key.sign(&self.transcript());
+    pub fn sign(self, key: &SigningKey, content_hash: &[u8; 32]) -> SignedCompactEnvelope {
+        let signature = key.sign(&self.transcript(content_hash));
         SignedCompactEnvelope {
             envelope: self,
             signature,
@@ -355,13 +382,15 @@ impl SignedCompactEnvelope {
         &self.envelope
     }
 
-    /// Check the signature against the manifest key for the claimed index.
+    /// Check the signature against the manifest key for the claimed index,
+    /// over the content hash of the case the receiver holds.
     ///
     /// # Errors
     ///
-    /// [`WireError::BadSignature`] if it does not verify.
-    pub fn verify(&self, key: &VerifyingKey) -> Result<(), WireError> {
-        key.verify(&self.envelope.transcript(), &self.signature)
+    /// [`WireError::BadSignature`] if it does not verify -- including when the
+    /// frame was signed over another case.
+    pub fn verify(&self, key: &VerifyingKey, content_hash: &[u8; 32]) -> Result<(), WireError> {
+        key.verify(&self.envelope.transcript(content_hash), &self.signature)
     }
 }
 

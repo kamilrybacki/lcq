@@ -52,7 +52,7 @@ fn main() {
         1,
         4_242,
     )
-    .sign(&SigningKey::from_seed([1; 32]));
+    .sign(&SigningKey::from_seed([1; 32]), &[0x5A; 32]);
     let compact_bytes = encode_compact(&compact).expect("encodes");
     let compact_sealed =
         seal(&GroupKey::from_bytes([9; 32]), 0, 4_242, &compact_bytes).expect("seals");

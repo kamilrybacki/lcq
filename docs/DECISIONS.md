@@ -1001,6 +1001,14 @@ member can request repairs it does not need and cost each holder one carried
 frame per round: bounded, and the same class of cost as an empty-list request
 (D10).
 
+**Amended 2026-09-19.** A carried vote arrives in the carrier's slot, not its
+author's, so the timing-based split check of D9 read two carried votes as two
+foreign anchors and declared a split in an honest lossy fleet (found by the
+container suite on the virtual chip once forwards could repeat every round).
+The timing check now runs only while the schedule is running; in repair rounds
+frames are expected off their author's slot, and a split there still shows by
+its label.
+
 ---
 
 ## D16 — One radio seam; the first radio after the hub is a virtual SX1262 under the unmodified `lora-phy` driver
@@ -1193,3 +1201,25 @@ calibrates them.
 Rules out: a capture rule without a clock, and a collision that is silent to
 the receiver when a real chip would have raised an IRQ. Revisit when hardware
 measurements say the lock window or the header window is elsewhere.
+
+---
+
+## D20 — A frame names its case by an eight-byte reference; the signature still covers the hash
+
+**Decided and implemented 2026-09-19.** D4 ranked this first among the airtime
+savings: the 32-byte content hash was 30 % of every frame, and every member
+already holds the case it votes on.
+
+On the wire a `CompactEnvelope` carries `case`, the first eight bytes of a
+domain-separated Blake2s of the content hash (`wire::case_reference`). The
+signature transcript covers the *full* hash, which the wire does not carry:
+the receiver supplies the one it holds for the case it is deliberating, and a
+frame signed over any other case fails to verify -- the reference is a lookup
+key, not a commitment, and picking the wrong case costs a failed signature
+check, never a wrong count. `MAX_FRAME_BYTES` is 152, twenty-four bytes down;
+at SF10 that is about 197 ms off every frame and the slot shrinks with it.
+
+Rules out: carrying the hash on the wire again, and any receiver that counts a
+frame without a case of its own to verify it against. Revisit if a fleet ever
+deliberates several cases at once with references that collide -- eight bytes
+make that a design fault, not a chance.

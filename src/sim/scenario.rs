@@ -346,7 +346,7 @@ impl Scenario {
             .map(|sender| self.frame_for(sender, &subject, &keys))
             .collect();
 
-        let mut run = Run::new(self, &frames, &manifest);
+        let mut run = Run::new(self, &frames, &manifest, *subject.content_hash());
         let mut pending: Vec<usize> = (self.silent..self.fleet)
             .filter(|i| *i != OBSERVER)
             .collect();
@@ -395,7 +395,8 @@ impl Scenario {
             1,
             sequence,
         );
-        let signed = encode_compact(&envelope.sign(signing)).expect("encodes");
+        let signed =
+            encode_compact(&envelope.sign(signing, subject.content_hash())).expect("encodes");
         // What goes on the air is sealed and carries its nonce header. Timing
         // the signed-but-unsealed form understates every airtime figure by a
         // fifth, and airtime is what the duty cycle is spent on.
@@ -406,6 +407,8 @@ impl Scenario {
 /// Mutable state for one execution of a [`Scenario`].
 struct Run<'a> {
     scenario: &'a Scenario,
+    /// The case every frame is about, for verifying the signatures over it.
+    content_hash: [u8; 32],
     frames: &'a [Vec<u8>],
     manifest: &'a [VerifyingKey],
     rng: Rng,
@@ -421,9 +424,15 @@ struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
-    fn new(scenario: &'a Scenario, frames: &'a [Vec<u8>], manifest: &'a [VerifyingKey]) -> Self {
+    fn new(
+        scenario: &'a Scenario,
+        frames: &'a [Vec<u8>],
+        manifest: &'a [VerifyingKey],
+        content_hash: [u8; 32],
+    ) -> Self {
         Self {
             scenario,
+            content_hash,
             frames,
             manifest,
             rng: Rng::new(scenario.seed),
@@ -621,7 +630,11 @@ impl<'a> Run<'a> {
             return Outcome::Rejected;
         };
         let claimed = received.envelope().author_index() as usize;
-        if claimed >= self.manifest.len() || received.verify(&self.manifest[claimed]).is_err() {
+        if claimed >= self.manifest.len()
+            || received
+                .verify(&self.manifest[claimed], &self.content_hash)
+                .is_err()
+        {
             self.tally.rejected += 1;
             return Outcome::Rejected;
         }

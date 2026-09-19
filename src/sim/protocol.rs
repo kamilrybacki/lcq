@@ -603,7 +603,7 @@ impl Deliberation {
         } else {
             &keys[sender]
         };
-        let signed = encode_compact(&envelope.sign(signing)).ok()?;
+        let signed = encode_compact(&envelope.sign(signing, subject.content_hash())).ok()?;
         // What actually goes on the air is sealed under the group key. Modelling
         // the unsealed frame understates every airtime figure by its overhead.
         let sealed = seal_frame(group, author, sequence, &signed).ok()?;
@@ -642,7 +642,11 @@ impl Deliberation {
             return Err(TransitionError::DifferentSubject);
         };
         let claimed = received.envelope().author_index() as usize;
-        if claimed >= manifest.len() || received.verify(&manifest[claimed]).is_err() {
+        if claimed >= manifest.len()
+            || received
+                .verify(&manifest[claimed], subject.content_hash())
+                .is_err()
+        {
             return Err(TransitionError::DifferentSubject);
         }
         // Read the stage and verdict FROM THE FRAME. Assuming them from the
@@ -672,7 +676,7 @@ impl Deliberation {
             verdict_code(Verdict::Support),
             u64::from(u32::MAX),
         );
-        let signed = encode_compact(&envelope.sign(key)).expect("encodes");
+        let signed = encode_compact(&envelope.sign(key, subject.content_hash())).expect("encodes");
         seal_frame(group, u16::MAX, u64::from(u32::MAX), &signed)
             .expect("seals")
             .len()

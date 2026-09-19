@@ -9,7 +9,7 @@ fn main() {
     let key = SigningKey::from_seed([7u8; 32]);
     let group = GroupKey::from_bytes([9u8; 32]);
     let envelope = CompactEnvelope::new(1, 1, 0, [0x11; 32], 1_700_000_000, 3, 3, 1, 4_242);
-    let signed = encode_compact(&envelope.sign(&key)).expect("encodes");
+    let signed = encode_compact(&envelope.sign(&key, &[0x11; 32])).expect("encodes");
     let sealed = seal(&group, 3, 4_242, &signed).expect("seals");
     let on_air = seal_frame(&group, 3, 4_242, &signed).expect("seals");
 

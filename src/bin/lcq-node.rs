@@ -38,7 +38,7 @@ use lcq::infrastructure::{HubRadio, LogJournal, ScaledClock};
 use lcq::sim::airtime_ms;
 use lcq::wire::{
     CompactEnvelope, GroupKey, Heard, MAX_FRAME_BYTES, RoundId, SigningKey, VerifyingKey,
-    decode_compact, encode_compact, open_frame, peek_frame_header, seal_frame,
+    case_reference, decode_compact, encode_compact, open_frame, peek_frame_header, seal_frame,
 };
 
 /// Every node in a run derives the same group key from this.
@@ -91,7 +91,7 @@ fn same_subject(envelope: &CompactEnvelope, subject: &Subject) -> bool {
     envelope.mission_epoch() == MISSION_EPOCH
         && envelope.event() == EVENT
         && envelope.revision() == REVISION
-        && envelope.content_hash() == subject.content_hash()
+        && envelope.case() == &case_reference(subject.content_hash())
         && envelope.started_at() == subject.started_at().as_secs()
 }
 
@@ -937,7 +937,13 @@ fn main() {
                 // different instant than we are -- the same split, seen from
                 // its effect rather than its label, which is the only way it
                 // shows when both halves carry the same label.
+                // Only while the schedule is running. In a repair round a
+                // carried vote arrives in the carrier's slot, not its author's,
+                // and two carried votes would read as two foreign anchors --
+                // a split declared by the very mechanism that heals a gap.
                 let by_timing = options.slots
+                    && repair_round().is_none()
+                    && Instant::now() < repair_start
                     && learned.stage_index.is_some_and(|s| {
                         let travel = Duration::from_millis(clock.wall_ms(
                             starts[s] * 1_000
@@ -1112,7 +1118,8 @@ fn build(
     )
     .acknowledging(heard)
     .in_round(round);
-    let signed = encode_compact(&envelope.sign(signing)).map_err(|e| e.to_string())?;
+    let signed = encode_compact(&envelope.sign(signing, subject.content_hash()))
+        .map_err(|e| e.to_string())?;
     let sealed = seal_frame(group, author, sequence, &signed).map_err(|e| e.to_string())?;
     if sealed.len() > MAX_FRAME_BYTES {
         // The slot is sized to MAX_FRAME_BYTES. A wider frame would overrun
@@ -1163,7 +1170,8 @@ fn build_nack(
     )
     .acknowledging(heard)
     .in_round(round);
-    let signed = encode_compact(&envelope.sign(key)).map_err(|e| e.to_string())?;
+    let signed =
+        encode_compact(&envelope.sign(key, subject.content_hash())).map_err(|e| e.to_string())?;
     seal_frame(group, author, sequence, &signed).map_err(|e| e.to_string())
 }
 
@@ -1192,7 +1200,8 @@ fn build_trigger(
         sequence,
     )
     .in_round(round);
-    let signed = encode_compact(&envelope.sign(key)).map_err(|e| e.to_string())?;
+    let signed =
+        encode_compact(&envelope.sign(key, subject.content_hash())).map_err(|e| e.to_string())?;
     seal_frame(group, author, sequence, &signed).map_err(|e| e.to_string())
 }
 
@@ -1265,7 +1274,7 @@ fn late_anchor(
     let author = usize::from(envelope.author_index());
     if !same_subject(envelope, subject)
         || author >= manifest.len()
-        || checked(frame.verify(&manifest[author])).is_err()
+        || checked(frame.verify(&manifest[author], subject.content_hash())).is_err()
         || usize::from(header_author) != author
         || header_sequence != envelope.sequence()
         || !envelope.round().is_set()
@@ -1343,7 +1352,9 @@ fn trigger_round(
         return None;
     }
     let claimed = usize::from(envelope.author_index());
-    if claimed >= manifest.len() || checked(frame.verify(&manifest[claimed])).is_err() {
+    if claimed >= manifest.len()
+        || checked(frame.verify(&manifest[claimed], subject.content_hash())).is_err()
+    {
         return None;
     }
     if usize::from(header_author) != claimed || header_sequence != envelope.sequence() {
@@ -1390,7 +1401,9 @@ fn admit(
         report(options, clock, "{\"event\":\"refused\",\"why\":\"header\"}");
         return learned;
     }
-    if claimed >= manifest.len() || checked(received.verify(&manifest[claimed])).is_err() {
+    if claimed >= manifest.len()
+        || checked(received.verify(&manifest[claimed], subject.content_hash())).is_err()
+    {
         report(
             options,
             clock,

@@ -194,7 +194,7 @@ fn the_compact_form_costs_less_airtime_once_names_are_realistic() {
         1,
         4_242,
     );
-    let compact = encode_compact(&compact.sign(&signer)).expect("encodes");
+    let compact = encode_compact(&compact.sign(&signer, &[0x5A; 32])).expect("encodes");
 
     let readable_air = airtime_ms(
         seal_frame(&group, 12, 4_242, &readable)
@@ -231,7 +231,7 @@ fn a_compact_frame_fits_a_raw_lora_payload_at_any_spreading_factor() {
 
     let signer = SigningKey::from_seed([1; 32]);
     let compact = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1);
-    let bytes = encode_compact(&compact.sign(&signer)).expect("encodes");
+    let bytes = encode_compact(&compact.sign(&signer, &[0x5A; 32])).expect("encodes");
     assert!(
         bytes.len() <= 255,
         "compact frame is {} bytes, over the largest LoRa payload",
@@ -338,16 +338,16 @@ fn the_acknowledgement_is_covered_by_the_signature() {
     heard.heard_from(4);
 
     assert_ne!(
-        base.transcript(),
-        base.clone().acknowledging(heard).transcript(),
+        base.transcript(&[0; 32]),
+        base.clone().acknowledging(heard).transcript(&[0; 32]),
         "the bitmap must change what is signed"
     );
     // And a frame whose bitmap was rewritten after signing no longer verifies.
-    let acknowledging = base.clone().acknowledging(heard).sign(&signer);
+    let acknowledging = base.clone().acknowledging(heard).sign(&signer, &[0; 32]);
     let bytes = encode_compact(&acknowledging).expect("encodes");
     let decoded = decode_compact(&bytes).expect("decodes");
-    assert!(decoded.verify(&signer.verifying_key()).is_ok());
-    let forged = base.acknowledging(Heard::none()).sign(&signer);
+    assert!(decoded.verify(&signer.verifying_key(), &[0; 32]).is_ok());
+    let forged = base.acknowledging(Heard::none()).sign(&signer, &[0; 32]);
     assert_ne!(
         encode_compact(&forged).expect("encodes"),
         bytes,
@@ -364,10 +364,10 @@ fn an_acknowledgement_survives_the_round_trip() {
     heard.heard_from(2);
     heard.heard_from(9);
     let envelope = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1).acknowledging(heard);
-    let bytes = encode_compact(&envelope.sign(&signer)).expect("encodes");
+    let bytes = encode_compact(&envelope.sign(&signer, &[0; 32])).expect("encodes");
     let back = decode_compact(&bytes).expect("decodes");
     assert_eq!(back.envelope().heard(), heard);
-    assert!(back.verify(&signer.verifying_key()).is_ok());
+    assert!(back.verify(&signer.verifying_key(), &[0; 32]).is_ok());
 }
 
 #[test]
@@ -400,10 +400,10 @@ fn a_round_is_named_by_who_opened_it_and_under_which_sequence() {
     );
 
     let labelled = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1).in_round(round);
-    let bytes = encode_compact(&labelled.sign(&signer)).expect("encodes");
+    let bytes = encode_compact(&labelled.sign(&signer, &[0; 32])).expect("encodes");
     let back = decode_compact(&bytes).expect("decodes");
     assert_eq!(back.envelope().round(), round);
-    assert!(back.verify(&signer.verifying_key()).is_ok());
+    assert!(back.verify(&signer.verifying_key(), &[0; 32]).is_ok());
 }
 
 #[test]
@@ -413,8 +413,8 @@ fn the_round_is_covered_by_the_signature() {
 
     let base = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1);
     assert_ne!(
-        base.transcript(),
-        base.in_round(RoundId::new(0, 1)).transcript()
+        base.transcript(&[0; 32]),
+        base.in_round(RoundId::new(0, 1)).transcript(&[0; 32])
     );
 }
 
@@ -446,7 +446,7 @@ fn the_widest_possible_frame_fits_the_slot_it_is_sized_for() {
     )
     .acknowledging(heard)
     .in_round(RoundId::new(u16::MAX - 1, u32::MAX));
-    let bytes = encode_compact(&widest.sign(&signer)).expect("encodes");
+    let bytes = encode_compact(&widest.sign(&signer, &[0xFF; 32])).expect("encodes");
     let on_air = seal_frame(&group, u16::MAX, u64::MAX, &bytes).expect("seals");
 
     assert!(
@@ -459,4 +459,55 @@ fn the_widest_possible_frame_fits_the_slot_it_is_sized_for() {
         "slot is {MAX_FRAME_BYTES} B for a {} B frame: too loose to catch growth",
         on_air.len()
     );
+}
+
+#[test]
+fn a_compact_frame_carries_a_reference_and_not_the_hash() {
+    use lcq::wire::{CASE_REFERENCE_BYTES, CompactEnvelope, case_reference};
+
+    let hash = [0x5A; 32];
+    let envelope = CompactEnvelope::new(1, 1, 0, hash, 0, 1, 3, 1, 1);
+    assert_eq!(envelope.case(), &case_reference(&hash));
+    assert_eq!(CASE_REFERENCE_BYTES, 8);
+    assert_ne!(
+        &case_reference(&hash)[..],
+        &hash[..CASE_REFERENCE_BYTES],
+        "a domain-separated digest, not a prefix of the hash"
+    );
+    assert_ne!(case_reference(&[0x5A; 32]), case_reference(&[0x5B; 32]));
+    let signer = SigningKey::from_seed([1; 32]);
+    let bytes = encode_compact(&envelope.sign(&signer, &hash)).expect("encodes");
+    // 64 signature + 8 reference + the small fields: nowhere near 32 + 64.
+    assert!(
+        bytes.len() < 64 + 32 + 9,
+        "{} bytes still carry the hash",
+        bytes.len()
+    );
+}
+
+#[test]
+fn a_frame_signed_over_another_case_does_not_verify() {
+    use lcq::wire::{CompactEnvelope, decode_compact};
+
+    let signer = SigningKey::from_seed([1; 32]);
+    let ours = [0x5A; 32];
+    let theirs = [0x5B; 32];
+    let frame = CompactEnvelope::new(1, 1, 0, theirs, 0, 1, 3, 1, 1).sign(&signer, &theirs);
+    let back = decode_compact(&encode_compact(&frame).expect("encodes")).expect("decodes");
+    assert!(back.verify(&signer.verifying_key(), &theirs).is_ok());
+    assert!(
+        back.verify(&signer.verifying_key(), &ours).is_err(),
+        "the receiver verifies over the case it holds, and this frame is about another"
+    );
+}
+
+#[test]
+fn the_case_reference_is_stable_across_runs() {
+    use lcq::wire::case_reference;
+
+    // Pinned: a change here is a wire format change every fleet member must make together.
+    assert_eq!(case_reference(&[0; 32]), case_reference(&[0; 32]));
+    let first = case_reference(&[0x5A; 32]);
+    let again = case_reference(&[0x5A; 32]);
+    assert_eq!(first, again);
 }

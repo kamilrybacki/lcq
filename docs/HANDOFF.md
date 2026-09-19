@@ -322,6 +322,23 @@ repair request fixed it (a request says the frame is still lacking), and the
 test passes deterministically again: 26 replays, 36 delivered, 49 dropped,
 every member at quorum. Gate on both radios: hub 20 of 20 in 640 s, virtual SX1262 20 of 20 in 631 s.
 
+### A frame names its case by reference (D20)
+
+The 32-byte content hash left the wire: a `CompactEnvelope` carries an
+eight-byte `case_reference` of it, and the signature transcript covers the
+full hash the receiver holds, so a frame about another case fails the
+signature check rather than being counted. `MAX_FRAME_BYTES` is 152 (from
+176); at SF10 that is roughly 200 ms off every frame and the slot shrinks
+with it. Every signing and verifying site takes the hash explicitly; the
+simulations and examples included.
+
+Found on the way, by the gate on the virtual chip: an honest fleet at 30 %
+loss declared a split. A member short of two votes got both carried by
+neighbours in *their* slots, and the timing-based split check read the two
+off-slot frames as two foreign anchors. The check now runs only while the
+schedule is running; repair rounds are where frames are expected off their
+author's slot. Gate on both radios: hub 20 of 20 in 745 s, virtual SX1262 20 of 20 in 631 s.
+
 ### What to pick up next
 
 1. **Hardware qualification** (roadmap M8): the virtual module passes the
@@ -363,6 +380,11 @@ every member at quorum. Gate on both radios: hub 20 of 20 in 640 s, virtual SX12
    `sensitivity_dbm_at` and `capture_wins` with `gr-lora_sdr` tables (D16).
 8. The replay page (artifact) shows D9-era numbers; regenerate the trace once
    the radio seam has landed.
+9. Upstream: https://github.com/lora-rs/lora-rs/pull/487 makes `lora-phy`'s
+   `rx()` return `RadioError::CrcError` / `HeaderError` instead of handing
+   corrupted bytes up. Once it is merged and the git dependency moves past it,
+   the virtual chip's IRQ peek (`Watch::irq_flags`) and the bench test that
+   pins the old behaviour can go, and a real board gets the same telemetry.
 
 Equivocation on the trigger (D6, D10) and acknowledgement on the air (D8) used
 to head this list; both are built and measured in containers.

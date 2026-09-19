@@ -16,7 +16,7 @@ fn main() {
         ("bez potwierdzenia", base.clone()),
         ("z bitmapa (10 slyszanych)", base.acknowledging(heard)),
     ] {
-        let signed = encode_compact(&envelope.sign(&key)).expect("encodes");
+        let signed = encode_compact(&envelope.sign(&key, &[0x11; 32])).expect("encodes");
         let on_air = seal_frame(&group, 3, 4_242, &signed).expect("seals");
         println!(
             "{name:<30}{:>5} B{:>8} ms",

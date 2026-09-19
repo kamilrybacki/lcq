@@ -28,7 +28,7 @@ fn main() {
         1,
         0,
     );
-    let frame = encode_compact(&envelope.sign(&key)).expect("encodes");
+    let frame = encode_compact(&envelope.sign(&key, subject.content_hash())).expect("encodes");
     let reference = sensitivity_dbm_at(10);
 
     println!(

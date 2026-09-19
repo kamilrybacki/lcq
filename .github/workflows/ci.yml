@@ -28,7 +28,8 @@ jobs:
         # The container suite (tests/containers.rs) needs Docker and a musl
         # toolchain and takes ten minutes a radio; it stays a local gate.
         run: |
-          cargo test --lib --bins --examples --doc
+          cargo test --lib --bins --examples
+          cargo test --doc
           for source in tests/*.rs; do
             name=$(basename "$source" .rs)
             [ "$name" = containers ] && continue

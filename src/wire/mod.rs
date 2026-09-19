@@ -18,8 +18,8 @@ mod crypto;
 
 pub use codec::{Envelope, SignedEnvelope, decode, encode};
 pub use compact::{
-    CompactEnvelope, Heard, MAX_FRAME_BYTES, RoundId, SignedCompactEnvelope, decode_compact,
-    encode_compact,
+    CASE_REFERENCE_BYTES, CompactEnvelope, Heard, MAX_FRAME_BYTES, RoundId, SignedCompactEnvelope,
+    case_reference, decode_compact, encode_compact,
 };
 pub use crypto::{
     FRAME_HEADER_BYTES, GroupKey, SigningKey, VerifyingKey, WireError, open, open_frame,
