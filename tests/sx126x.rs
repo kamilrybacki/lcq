@@ -43,7 +43,7 @@ struct Bench {
 fn bench(scale: u32) -> Bench {
     let (outbound, on_air) = channel();
     let (events_in, events) = channel();
-    let chip = Chip::new(scale, outbound, events_in);
+    let chip = Chip::new(scale, 6, outbound, events_in);
     let kind = Sx126x::new(
         VirtualSpi::new(chip.clone()),
         VirtualIv::new(chip.clone()),
@@ -279,7 +279,7 @@ fn a_frame_that_began_before_the_chip_listened_is_missed() {
 fn a_transmitting_chip_is_deaf() {
     let (outbound, _on_air) = channel();
     let (events_in, _events) = channel();
-    let chip = Chip::new(1, outbound, events_in);
+    let chip = Chip::new(1, 6, outbound, events_in);
     let kind = Sx126x::new(
         VirtualSpi::new(chip.clone()),
         VirtualIv::new(chip.clone()),

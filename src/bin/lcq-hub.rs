@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lcq::application::PhyProfile;
 use lcq::infrastructure::hub::{Delivery, write_delivery};
 use lcq::sim::{Link, SENSITIVITY_DBM, TX_POWER_DBM, airtime_ms, capture_wins, rssi_dbm, snr_db};
 use lcq::wire::peek_frame_header;
@@ -85,7 +86,10 @@ fn main() {
     let port = listener.local_addr().expect("addr").port();
     // Printed first and flushed, so a harness can read the port before the
     // nodes it is about to start need it.
-    println!("{{\"event\":\"listening\",\"port\":{port}}}");
+    println!(
+        "{{\"event\":\"listening\",\"port\":{port},\"phy\":\"{}\"}}",
+        PhyProfile::eu868_sf10().name
+    );
     let _ = std::io::stdout().flush();
 
     let writers: Arc<Mutex<HashMap<usize, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));

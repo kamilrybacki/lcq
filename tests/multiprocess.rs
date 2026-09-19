@@ -111,10 +111,15 @@ impl Hub {
         let stdout = child.stdout.take().expect("hub stdout");
         let mut lines = BufReader::new(stdout).lines();
         let first = lines.next().expect("hub announces").expect("readable");
+        // Digits after the key, whatever else the line carries after them.
         let port = first
             .split("\"port\":")
             .nth(1)
-            .and_then(|rest| rest.trim_end_matches('}').trim().parse().ok())
+            .and_then(|rest| {
+                rest.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|digits| digits.parse().ok())
+            })
             .expect("hub port");
         // The rest of the hub's log is drained on its own thread so a full pipe
         // can never wedge the emulator mid-run.

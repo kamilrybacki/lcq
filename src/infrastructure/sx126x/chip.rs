@@ -81,12 +81,6 @@ const TICK: Duration = Duration::from_nanos(15_625);
 /// How long BUSY stays high after a command: the order of what the datasheet
 /// gives for most commands, unscaled because it is the chip's own time.
 const BUSY: Duration = Duration::from_micros(100);
-/// How much of a preamble a receiver must hear to lock on. Six symbols:
-/// conservative against `LoRaSim`'s five, and the shortest preamble `RadioLib`
-/// recommends. A model parameter, not a fact about the chip, to be calibrated
-/// on hardware (D16); what the configured preamble has beyond it is how late a
-/// listener may start.
-const PREAMBLE_SYMBOLS_TO_LOCK: u16 = 6;
 /// The least a late listener is forgiven, as wall time: scheduling jitter when
 /// a test compresses time a hundredfold.
 const LATE_TOLERANCE_FLOOR: Duration = Duration::from_millis(5);
@@ -359,6 +353,11 @@ struct Inner {
     outbound: Sender<Vec<u8>>,
     events: Sender<RadioEvent>,
     scale: u32,
+    /// How much of a preamble a receiver must hear to lock on: the profile's
+    /// number (`PhyProfile::preamble_symbols_to_lock`), a model parameter to
+    /// be calibrated on hardware. What the configured preamble has beyond it
+    /// is how late a listener may start.
+    lock_symbols: u16,
 }
 
 /// One virtual chip, shared by its bus, its control lines, its medium and its
@@ -371,9 +370,15 @@ pub struct Chip {
 impl Chip {
     /// A chip in standby. Frames it transmits go to `outbound`; what it has to
     /// say about frames it missed goes to `events`. `scale` compresses its
-    /// airtime and timeouts the way the rest of a test compresses time.
+    /// airtime and timeouts the way the rest of a test compresses time;
+    /// `lock_symbols` is how much preamble a receiver needs, from the profile.
     #[must_use]
-    pub fn new(scale: u32, outbound: Sender<Vec<u8>>, events: Sender<RadioEvent>) -> Self {
+    pub fn new(
+        scale: u32,
+        lock_symbols: u16,
+        outbound: Sender<Vec<u8>>,
+        events: Sender<RadioEvent>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 model: Mutex::new(Model::fresh()),
@@ -381,6 +386,7 @@ impl Chip {
                 outbound,
                 events,
                 scale: scale.max(1),
+                lock_symbols,
             }),
         }
     }
@@ -632,7 +638,7 @@ impl Chip {
         let spare = model
             .packet
             .preamble_symbols
-            .saturating_sub(PREAMBLE_SYMBOLS_TO_LOCK);
+            .saturating_sub(self.inner.lock_symbols);
         (self.scaled(symbol) * u32::from(spare)).max(LATE_TOLERANCE_FLOOR)
     }
 

@@ -24,7 +24,8 @@ impl Topology {
 ///
 /// Changing this changes [`crate::sim::SENSITIVITY_DBM`] too: the two describe
 /// one radio profile and are meaningless apart.
-pub const DEFAULT_SPREADING_FACTOR: u8 = 10;
+pub const DEFAULT_SPREADING_FACTOR: u8 =
+    crate::application::PhyProfile::eu868_sf10().spreading_factor;
 
 /// Time on air for a payload at the default spreading factor, in milliseconds.
 #[must_use]

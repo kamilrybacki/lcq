@@ -550,6 +550,12 @@ struct Final {
     recovered_vote: bool,
     binding_attempts: usize,
     acknowledged: bool,
+    /// Signature checks this node paid for.
+    verifications: usize,
+    /// Frames its radio reported as CRC failures.
+    crc_errors: usize,
+    /// Frames its chip could not hear: transmitting, idle, or too late.
+    chip_missed: usize,
 }
 
 fn last_final(logs: &str) -> Option<Final> {
@@ -563,6 +569,9 @@ fn last_final(logs: &str) -> Option<Final> {
             recovered_vote: line.contains("\"recovered_vote\":true"),
             binding_attempts: field(line, "\"binding_attempts\":"),
             acknowledged: line.contains("\"acknowledged\":true"),
+            verifications: field(line, "\"verifications\":"),
+            crc_errors: field(line, "\"crc_errors\":"),
+            chip_missed: field(line, "\"chip_missed\":"),
         })
 }
 
@@ -620,6 +629,7 @@ fn note_anomalies(ships: &[Ship]) {
                 "not_sent",
                 "schedule_unfit",
                 "\"derived\"",
+                "chip_missed",
             ]
             .iter()
             .any(|needle| l.contains(needle))
@@ -1776,7 +1786,9 @@ fn a_fleet_on_virtual_sx1262_radios_reaches_one_verdict() {
     }
     note_anomalies(&ships);
 
-    // The real driver brought every chip up and nothing it did failed.
+    // The real driver brought every chip up and nothing it did failed, and
+    // the slot schedule kept every member out of everybody else's airtime: a
+    // chip that missed a frame while transmitting is a schedule that broke.
     for ship in &ships {
         assert_eq!(
             count_in_log(ship, "\"chip_up\""),
@@ -1789,6 +1801,18 @@ fn a_fleet_on_virtual_sx1262_radios_reaches_one_verdict() {
             0,
             "statek {}: sterownik zglosil blad",
             ship.index
+        );
+    }
+    for (index, result) in finals.iter().enumerate() {
+        assert_eq!(result.chip_missed, 0, "statek {index}: chip pominal ramki");
+        assert_eq!(
+            result.crc_errors, 0,
+            "statek {index}: bledy CRC na czystym kanale"
+        );
+        assert!(
+            result.verifications >= fleet - 1,
+            "statek {index}: tylko {} weryfikacji",
+            result.verifications
         );
     }
     for (index, result) in finals.iter().enumerate() {

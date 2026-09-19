@@ -1098,3 +1098,56 @@ What the chip model asserts, and what it leaves out:
 
 Measured: baseline fleet 5/5 on both radios, no frame missed by any chip; nine
 bench tests under the real driver; 20 of 20 tests in 638 s, no container left behind, geometry tally still [5, 5, 5, 5, 5] with relaying through the virtual chips.
+
+---
+
+## D17 — Replay detection is a per-sender window, not "newest wins"
+
+**Decided and implemented 2026-09-19.** `application::replay::ReplayWindow`,
+`REPLAY_WINDOW = 64`; tests in `tests/replay.rs`.
+
+The first rule was: any frame from a sender at or below the highest sequence
+already seen from it is a replay. Correct against the replay adversary, and
+wrong for a genuine older frame carried late -- the case D15 created: a vote
+relayed by a neighbour after its author's later frame (a NACK, a resend) has
+already been heard. Under "newest wins" the relayed vote is dropped by the one
+member who needed it.
+
+The window keeps one bit per recent sequence, sixty-four deep, per sender: a
+sequence above the highest advances the window; one inside it is admitted if
+its bit is clear and refused if set; one older than the window is refused
+because nothing that old can be told apart any more. Memory per sender is
+fixed whatever the traffic. This is the IPsec anti-replay shape, and it keeps
+D10's property -- no receiver pays a signature check for a frame it already
+had -- while letting a late genuine frame through exactly once.
+
+Rules out: unbounded per-sender history, and any rule that lets a frame be
+admitted twice. Revisit if a sender can legitimately have more than sixty-four
+frames in flight behind its newest, which no stage of this protocol comes near.
+
+---
+
+## D18 — One frozen PHY profile, and a node that reports what it spent
+
+**Decided and implemented 2026-09-19**, from Hermes's review of D16.
+
+`PhyProfile::eu868_sf10()` is versioned (`eu868-sf10-v1`) and complete:
+spreading factor, bandwidth, coding rate, preamble, header mode, CRC, IQ,
+low-data-rate optimisation, frequency, power, sync word, receive mode, CAD
+parameters, the preamble a lock needs, the capture threshold. Every process
+logs its name; the hub's spreading factor, carrier, power and capture
+threshold are pinned to it by `tests/phy_profile.rs`, which also checks that
+the emulator's airtime rule and the chip driver's time-on-air agree to the
+millisecond across payload sizes. The driver is configured from the profile,
+field by field, and refuses a profile whose low-data-rate flag disagrees with
+the chip's own rule. An emulator run and a hardware run are compared on this
+profile or not at all.
+
+The node's final report carries meters: signature checks paid for, CRC
+failures heard, frames its chip could not hear, replays dropped before any
+check, airtime spent, evidence frames kept, whether it saw a split. The
+container harness reads them, and the virtual-fleet test asserts that no chip
+missed a frame and no CRC failure occurred on a clean channel. Own-vote
+resends in a repair round now ride `RadioQueue` in the distress class, ahead
+of carried votes in the routine class -- the queue decides the order, not an
+ad hoc flag -- which is the first use of the class M5 reserved.

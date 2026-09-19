@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: format
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: build
+        run: cargo build --all-targets
+      - name: tests
+        # The container suite (tests/containers.rs) needs Docker and a musl
+        # toolchain and takes ten minutes a radio; it stays a local gate.
+        run: |
+          cargo test --lib --bins --examples --doc
+          for source in tests/*.rs; do
+            name=$(basename "$source" .rs)
+            [ "$name" = containers ] && continue
+            cargo test --test "$name"
+          done

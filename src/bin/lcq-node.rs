@@ -20,10 +20,12 @@ use std::time::{Duration, Instant};
 
 use lcq::application::{
     AirtimeBudget, Journal, OutgoingFrame, PhyProfile, Priority, Radio, RadioEvent, RadioQueue,
+    ReplayWindow,
 };
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lcq::domain::contracts::{
     BINDING_STAGE_OPENS_SECONDS, ENDORSEMENT_TARGET_SECONDS, Opinion, Stage, Subject, Verdict,
@@ -176,9 +178,10 @@ fn main() {
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"start\",\"index\":{},\"radio\":\"{}\",\"recovered_vote\":{recovered_vote},\"pending\":{}}}",
+            "{{\"event\":\"start\",\"index\":{},\"radio\":\"{}\",\"phy\":\"{}\",\"recovered_vote\":{recovered_vote},\"pending\":{}}}",
             options.index,
             options.radio.name(),
+            PhyProfile::eu868_sf10().name,
             journal.pending().count()
         ),
     );
@@ -212,7 +215,6 @@ fn main() {
     // line carries one end's vote to the other, in its own slot, with the
     // signature and the seal exactly as they were. Bounded, and fair between
     // classes, so a flood of requests cannot crowd out our own vote.
-    let mut owe_resend = false;
     let mut forwards = RadioQueue::with_capacity(64, 64 * MAX_FRAME_BYTES);
     // The round this node joined, and whether anybody turned out to be in a
     // different one. Signatures do not stop a member saying two things, so a
@@ -276,7 +278,7 @@ fn main() {
     // dropped before paying for decryption and a signature check. Advanced only
     // after the signature verifies: the cleartext header is a claim, and anyone
     // holding the group key could otherwise poison the window with forgeries.
-    let mut last_seen: Vec<Option<u64>> = vec![None; options.fleet];
+    let mut windows: Vec<ReplayWindow> = vec![ReplayWindow::new(); options.fleet];
     let mut attempts = [0usize; 3];
 
     let stage_window = options.stage_window_s();
@@ -383,12 +385,12 @@ fn main() {
             // Nothing to schedule against yet: the only thing worth doing is
             // listening for the frame that opens the round.
             if let Some(frame) = receive(radio.as_mut(), &options, &clock)
-                && !is_replay(&frame, &last_seen)
+                && !is_replay(&frame, &windows)
             {
                 if let Some((opened, opener, sequence)) =
                     trigger_round(&frame, &group, &manifest, &subject)
                 {
-                    last_seen[opener] = Some(sequence);
+                    windows[opener].mark(sequence);
                     round = opened;
                     began = Some(Instant::now());
                     clock = ScaledClock::new(epoch, options.scale, options.offset);
@@ -405,7 +407,7 @@ fn main() {
                     // schedule is deterministic: the vote's sender and stage
                     // say exactly when the round began. Waiting for a trigger
                     // that has already gone would mean never joining.
-                    last_seen[late.author] = Some(late.sequence);
+                    windows[late.author].mark(late.sequence);
                     round = late.round;
                     began = Some(late.origin);
                     clock =
@@ -666,7 +668,7 @@ fn main() {
                     // and reaches the state machine, which refuses it -- but
                     // only after paying for a signature verification.
                     if let Ok((_, sequence)) = peek_frame_header(&bytes) {
-                        last_seen[options.index] = Some(sequence);
+                        windows[options.index].mark(sequence);
                     }
                     // The next attempt returns to this member's own slot in the
                     // next window -- unless a split is known, in which case the
@@ -789,30 +791,21 @@ fn main() {
             && Instant::now() >= at
         {
             repair_due = None;
-            // One frame per slot. Our own vote first; a carried vote otherwise.
-            if owe_resend {
-                owe_resend = false;
-                if let Some(again) = journal.pending().next().map(|f| f.bytes().to_vec()) {
-                    transmit(
-                        radio.as_mut(),
-                        &mut budget,
-                        &again,
-                        started,
-                        &options,
-                        &clock,
-                    );
-                    report(&options, &clock, "{\"event\":\"repaired\"}");
-                }
-            } else if let Some(carried) = forwards.take_next() {
-                let author = carried.sequence() >> 48;
-                if transmit(
+            // One frame per slot, in the queue's order: our own vote is the
+            // distress class and goes first, carried votes are routine.
+            if let Some(carried) = forwards.take_next() {
+                let author = usize::try_from(carried.sequence() >> 48).unwrap_or(usize::MAX);
+                let sent = transmit(
                     radio.as_mut(),
                     &mut budget,
                     carried.bytes(),
                     started,
                     &options,
                     &clock,
-                ) {
+                );
+                if sent && author == options.index {
+                    report(&options, &clock, "{\"event\":\"repaired\"}");
+                } else if sent {
                     report(
                         &options,
                         &clock,
@@ -827,14 +820,15 @@ fn main() {
         // its own slot because it was busy reading is a node that collides with
         // whoever comes next.
         if let Some(frame) = receive(radio.as_mut(), &options, &clock) {
-            if is_replay(&frame, &last_seen) {
+            if is_replay(&frame, &windows) {
+                bump(&METER.replays_dropped);
                 report(&options, &clock, "{\"event\":\"replay_dropped\"}");
                 continue;
             }
             if let Some((other, opener, sequence)) =
                 trigger_round(&frame, &group, &manifest, &subject)
             {
-                last_seen[opener] = Some(sequence);
+                windows[opener].mark(sequence);
                 if other != round {
                     // A second, validly signed opening for the same subject.
                     // Signatures do not stop a member saying two things; what
@@ -864,7 +858,7 @@ fn main() {
                 captured = Some(frame.clone());
             }
             if let Some((from, sequence)) = learned.verified {
-                last_seen[from] = Some(sequence);
+                windows[from].mark(sequence);
                 if learned.refused == Some(TransitionError::WrongStageForPhase)
                     && learned.stage_index == Some(2)
                 {
@@ -904,9 +898,22 @@ fn main() {
                             }
                         }
                     }
-                    if owes_own || queued > 0 {
+                    // Our own vote rides the same queue in the distress
+                    // class, so it goes out first; carried votes are routine.
+                    if owes_own
+                        && let Some(again) = journal.pending().next()
+                        && let Ok((_, sequence)) = peek_frame_header(again.bytes())
+                    {
+                        let own = OutgoingFrame::new(
+                            again.bytes().to_vec(),
+                            forward_key(options.index, sequence),
+                        );
+                        if forwards.offer(own, Priority::Distress).is_ok() {
+                            queued += 1;
+                        }
+                    }
+                    if queued > 0 {
                         repaired_round = Some(round_index);
-                        owe_resend = owes_own;
                         let resend_window = u32::try_from(2 * round_index + 1).unwrap_or(u32::MAX);
                         repair_due = Some(repair_start + window_wall * resend_window + own_slot);
                         if queued > 0 {
@@ -1017,12 +1024,23 @@ fn main() {
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged}}}",
+            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
             options.index,
             supporters.len(),
             policy.min_signers(),
             approved,
-            attempts[2]
+            attempts[2],
+            METER.verifications.load(Ordering::Relaxed),
+            METER.crc_errors.load(Ordering::Relaxed),
+            METER.chip_missed.load(Ordering::Relaxed),
+            METER.replays_dropped.load(Ordering::Relaxed),
+            budget.used_ms(
+                u64::try_from(started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::from(options.scale))
+            ),
+            evidence.len(),
+            u8::from(split)
         ),
     );
 }
@@ -1244,7 +1262,7 @@ fn late_anchor(
     let author = usize::from(envelope.author_index());
     if !same_subject(envelope, subject)
         || author >= manifest.len()
-        || frame.verify(&manifest[author]).is_err()
+        || checked(frame.verify(&manifest[author])).is_err()
         || usize::from(header_author) != author
         || header_sequence != envelope.sequence()
         || !envelope.round().is_set()
@@ -1263,14 +1281,40 @@ fn late_anchor(
 }
 
 /// Whether a frame repeats a sequence already verified from its sender.
-fn is_replay(frame: &[u8], last_seen: &[Option<u64>]) -> bool {
+fn is_replay(frame: &[u8], windows: &[ReplayWindow]) -> bool {
     peek_frame_header(frame).is_ok_and(|(author, sequence)| {
-        last_seen
+        windows
             .get(usize::from(author))
-            .copied()
-            .flatten()
-            .is_some_and(|seen| sequence <= seen)
+            .is_some_and(|window| window.seen(sequence))
     })
+}
+
+/// What this node has spent and seen, for its final report. Atomics because
+/// the counting happens in helpers that have no business carrying a meter
+/// around, and one process has one radio.
+struct Meter {
+    verifications: AtomicU64,
+    crc_errors: AtomicU64,
+    chip_missed: AtomicU64,
+    replays_dropped: AtomicU64,
+}
+
+static METER: Meter = Meter {
+    verifications: AtomicU64::new(0),
+    crc_errors: AtomicU64::new(0),
+    chip_missed: AtomicU64::new(0),
+    replays_dropped: AtomicU64::new(0),
+};
+
+fn bump(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A signature check, counted: the most expensive thing a frame can cost
+/// before it is refused.
+fn checked<E>(outcome: Result<(), E>) -> Result<(), E> {
+    bump(&METER.verifications);
+    outcome
 }
 
 /// The round a frame opens, if it opens one -- and only if it is genuine.
@@ -1294,7 +1338,7 @@ fn trigger_round(
         return None;
     }
     let claimed = usize::from(envelope.author_index());
-    if claimed >= manifest.len() || frame.verify(&manifest[claimed]).is_err() {
+    if claimed >= manifest.len() || checked(frame.verify(&manifest[claimed])).is_err() {
         return None;
     }
     if usize::from(header_author) != claimed || header_sequence != envelope.sequence() {
@@ -1341,7 +1385,7 @@ fn admit(
         report(options, clock, "{\"event\":\"refused\",\"why\":\"header\"}");
         return learned;
     }
-    if claimed >= manifest.len() || received.verify(&manifest[claimed]).is_err() {
+    if claimed >= manifest.len() || checked(received.verify(&manifest[claimed])).is_err() {
         report(
             options,
             clock,
@@ -1513,12 +1557,20 @@ fn receive(radio: &mut dyn Radio, options: &Options, clock: &impl Clock) -> Opti
     loop {
         match radio.poll()? {
             RadioEvent::Received(received) => return Some(received.bytes),
-            RadioEvent::CrcError { rssi_dbm } => report(
-                options,
-                clock,
-                &format!("{{\"event\":\"crc_error\",\"rssi\":{rssi_dbm}}}"),
-            ),
-            RadioEvent::Note(body) => report(options, clock, &format!("{{{body}}}")),
+            RadioEvent::CrcError { rssi_dbm } => {
+                bump(&METER.crc_errors);
+                report(
+                    options,
+                    clock,
+                    &format!("{{\"event\":\"crc_error\",\"rssi\":{rssi_dbm}}}"),
+                );
+            }
+            RadioEvent::Note(body) => {
+                if body.contains("\"chip_missed\"") {
+                    bump(&METER.chip_missed);
+                }
+                report(options, clock, &format!("{{{body}}}"));
+            }
         }
     }
 }

@@ -29,6 +29,9 @@ const MAX_PAYLOAD_BYTES: usize = 255;
 /// How long the driver thread waits for something to happen before it looks
 /// around anyway.
 const IDLE_WAIT: Duration = Duration::from_millis(250);
+/// The longest timed receive the chip's 24-bit timer allows, for a profile
+/// that does not listen continuously.
+const LONGEST_TIMED_RX_MS: u32 = 262_000;
 
 /// Why the radio could not be started.
 #[derive(Debug)]
@@ -83,7 +86,12 @@ impl Sx126xRadio {
         let (mut writer, deliveries) = socket.into_parts();
         let (outbound, to_medium) = channel::<Vec<u8>>();
         let (events_in, events) = channel::<RadioEvent>();
-        let chip = Chip::new(scale, outbound, events_in.clone());
+        let chip = Chip::new(
+            scale,
+            profile.preamble_symbols_to_lock,
+            outbound,
+            events_in.clone(),
+        );
 
         let listener = chip.clone();
         thread::Builder::new()
@@ -169,7 +177,8 @@ fn drive(
     note(
         events,
         format!(
-            "\"event\":\"chip_up\",\"sf\":{},\"bw_hz\":{},\"frequency_hz\":{},\"scale\":{}",
+            "\"event\":\"chip_up\",\"phy\":\"{}\",\"sf\":{},\"bw_hz\":{},\"frequency_hz\":{},\"scale\":{}",
+            profile.name,
             profile.spreading_factor,
             profile.bandwidth_hz,
             profile.frequency_hz,
@@ -212,6 +221,7 @@ struct Driver {
     tx_params: PacketParams,
     rx_params: PacketParams,
     power_dbm: i32,
+    rx_continuous: bool,
 }
 
 impl Driver {
@@ -237,16 +247,28 @@ impl Driver {
         let modulation = lora
             .create_modulation_params(sf, bw, cr, profile.frequency_hz)
             .map_err(|error| format!("modulation: {error:?}"))?;
+        if modulation.low_data_rate_optimize != u8::from(profile.low_data_rate_optimize) {
+            return Err(format!(
+                "profile says low data rate optimisation {}, the chip's rule says otherwise",
+                profile.low_data_rate_optimize
+            ));
+        }
         let tx_params = lora
-            .create_tx_packet_params(profile.preamble_symbols, false, true, false, &modulation)
+            .create_tx_packet_params(
+                profile.preamble_symbols,
+                !profile.explicit_header,
+                profile.crc_on,
+                profile.iq_inverted,
+                &modulation,
+            )
             .map_err(|error| format!("tx packet params: {error:?}"))?;
         let rx_params = lora
             .create_rx_packet_params(
                 profile.preamble_symbols,
-                false,
+                !profile.explicit_header,
                 u8::MAX,
-                true,
-                false,
+                profile.crc_on,
+                profile.iq_inverted,
                 &modulation,
             )
             .map_err(|error| format!("rx packet params: {error:?}"))?;
@@ -256,6 +278,7 @@ impl Driver {
             tx_params,
             rx_params,
             power_dbm: i32::from(profile.tx_power_dbm),
+            rx_continuous: profile.rx_continuous,
         };
         driver
             .listen()
@@ -263,11 +286,17 @@ impl Driver {
         Ok(driver)
     }
 
-    /// Receive continuously until something else is asked of the chip.
+    /// Receive until something else is asked of the chip: continuously, as
+    /// the profile says, or the chip's longest timed receive otherwise.
     fn listen(&mut self) -> Result<(), DriverError> {
+        let mode = if self.rx_continuous {
+            RxMode::Continuous
+        } else {
+            RxMode::SingleMs(LONGEST_TIMED_RX_MS)
+        };
         block_on(
             self.lora
-                .prepare_for_rx(RxMode::Continuous, &self.modulation, &self.rx_params),
+                .prepare_for_rx(mode, &self.modulation, &self.rx_params),
         )?;
         block_on(self.lora.start_rx())
     }
