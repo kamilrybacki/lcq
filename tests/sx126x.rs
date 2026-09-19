@@ -22,6 +22,8 @@ type Driver = LoRa<Sx126x<VirtualSpi, VirtualIv, Sx1262>, HostDelay>;
 
 const FREQUENCY_HZ: u32 = 868_100_000;
 const PREAMBLE: u16 = 8;
+/// One SF10 symbol at 125 kHz.
+const SYMBOL_MS: f64 = 8.192;
 /// Time on air of a 32-byte SF10/125 kHz frame with CR 4/5, eight preamble
 /// symbols, explicit header and CRC: 55.25 symbols of 8.192 ms.
 const AIRTIME_32_BYTES: Duration = Duration::from_millis(452);
@@ -34,6 +36,7 @@ struct Bench {
     modulation: ModulationParams,
     tx_params: PacketParams,
     rx_params: PacketParams,
+    listening_since: Option<Instant>,
 }
 
 /// A chip on its bench: brought up by the real driver, medium in hand.
@@ -74,6 +77,7 @@ fn bench(scale: u32) -> Bench {
         modulation,
         tx_params,
         rx_params,
+        listening_since: None,
     }
 }
 
@@ -85,6 +89,32 @@ impl Bench {
         )
         .expect("prepare rx");
         block_on(self.driver.start_rx()).expect("start rx");
+        self.listening_since = Some(Instant::now());
+    }
+
+    /// Listen with a preamble of another length.
+    fn listen_with_preamble(&mut self, preamble: u16) {
+        self.rx_params = self
+            .driver
+            .create_rx_packet_params(preamble, false, 255, true, false, &self.modulation)
+            .expect("rx params");
+        self.listen();
+    }
+
+    /// A frame ending now that began the given number of symbols before the
+    /// chip started listening. Whether it is received is the late-listener
+    /// rule, and nothing else.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn deliver_started_before_listening(&mut self, symbols: f64) {
+        let since = self
+            .listening_since
+            .expect("listening")
+            .elapsed()
+            .as_secs_f64()
+            * 1_000.0;
+        let airtime_ms = (since + symbols * SYMBOL_MS).round() as u32;
+        self.chip
+            .deliver(&delivery(frame(0x42, 20), airtime_ms, true));
     }
 
     fn transmit(&mut self, bytes: &[u8]) {
@@ -316,4 +346,35 @@ fn any_command_wakes_a_sleeping_chip() {
     assert_eq!(bench.chip.snapshot().mode, ChipMode::Sleep);
     bench.listen();
     assert_eq!(bench.chip.snapshot().mode, ChipMode::Receive);
+}
+
+#[test]
+fn an_eight_symbol_preamble_forgives_a_listener_one_and_a_half_symbols_late() {
+    let mut bench = bench(1);
+    bench.listen();
+    bench.deliver_started_before_listening(1.5);
+    assert!(bench.service().is_some(), "{:?}", bench.chip.snapshot());
+}
+
+#[test]
+fn an_eight_symbol_preamble_does_not_forgive_two_and_a_half_symbols() {
+    let mut bench = bench(1);
+    bench.listen();
+    bench.deliver_started_before_listening(2.5);
+    let snapshot = bench.chip.snapshot();
+    assert_eq!(snapshot.counters.missed_late, 1, "{snapshot:?}");
+    assert!(!bench.chip.irq_pending());
+}
+
+#[test]
+fn a_twelve_symbol_preamble_forgives_five_and_a_half_symbols_but_not_six_and_a_half() {
+    let mut bench = bench(1);
+    bench.listen_with_preamble(12);
+    bench.deliver_started_before_listening(5.5);
+    assert!(bench.service().is_some(), "{:?}", bench.chip.snapshot());
+
+    bench.deliver_started_before_listening(6.5);
+    let snapshot = bench.chip.snapshot();
+    assert_eq!(snapshot.counters.missed_late, 1, "{snapshot:?}");
+    assert_eq!(snapshot.counters.received, 1);
 }

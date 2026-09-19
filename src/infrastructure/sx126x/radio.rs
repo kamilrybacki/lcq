@@ -19,7 +19,7 @@ use lora_phy::mod_traits::IrqState;
 use lora_phy::sx126x::{Config, Sx126x, Sx1262};
 
 use super::bus::{HostDelay, VirtualIv, VirtualSpi};
-use super::chip::Chip;
+use super::chip::{Chip, IRQ_CRC_ERR};
 use super::executor::block_on;
 use crate::application::{PhyProfile, Radio, RadioError, RadioEvent, Received};
 use crate::infrastructure::hub::{HubError, HubSocket};
@@ -180,7 +180,7 @@ fn drive(
     loop {
         let activity = chip.wait_for_activity(IDLE_WAIT);
         if activity.irq {
-            driver.service_irq(&mut buffer, events);
+            driver.service_irq(chip, &mut buffer, events);
         }
         loop {
             match commands.try_recv() {
@@ -284,10 +284,21 @@ impl Driver {
     }
 
     /// Something reached DIO1 while listening.
-    fn service_irq(&mut self, buffer: &mut [u8], events: &Sender<RadioEvent>) {
+    fn service_irq(&mut self, chip: &Chip, buffer: &mut [u8], events: &Sender<RadioEvent>) {
         match block_on(self.lora.process_irq_event()) {
             Ok(Some(IrqState::Done)) => {
+                // The driver does not say whether the frame passed its CRC --
+                // it reports a reception either way -- but the chip does, in
+                // the IRQ status nothing has cleared yet; a real adapter would
+                // read `GetIrqStatus` for the same answer. A failed frame is
+                // telemetry, never a frame: nothing above this decodes it.
+                let corrupted = chip.snapshot().irq_status & IRQ_CRC_ERR != 0;
                 match block_on(self.lora.get_rx_result(&self.rx_params, buffer)) {
+                    Ok((_, status)) if corrupted => {
+                        let _ = events.send(RadioEvent::CrcError {
+                            rssi_dbm: status.rssi,
+                        });
+                    }
                     Ok((length, status)) => {
                         let _ = events.send(RadioEvent::Received(Received {
                             bytes: buffer[..usize::from(length)].to_vec(),

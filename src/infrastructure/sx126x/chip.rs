@@ -7,7 +7,9 @@
 //! received only when the chip was in receive mode for the whole of it. What
 //! is not: the register map beyond storage (writes are kept and read back,
 //! nothing acts on them), calibration, the front end, and anything the
-//! datasheet leaves to measurement.
+//! datasheet leaves to measurement. Where the model has to pick a number the
+//! datasheet does not give -- how much preamble a lock needs -- it says so and
+//! picks conservatively; hardware calibrates it, not this file.
 //!
 //! Frames come from the medium as [`Delivery`] values at the moment they end,
 //! which is when a chip raises `RxDone` too. Frames leave through a channel to
@@ -79,9 +81,14 @@ const TICK: Duration = Duration::from_nanos(15_625);
 /// How long BUSY stays high after a command: the order of what the datasheet
 /// gives for most commands, unscaled because it is the chip's own time.
 const BUSY: Duration = Duration::from_micros(100);
-/// The least a receiver may have missed of a preamble and still lock on, as
-/// wall time. Two symbols is the physical rule; the floor covers scheduling
-/// jitter when a test compresses time a hundredfold.
+/// How much of a preamble a receiver must hear to lock on. Six symbols:
+/// conservative against `LoRaSim`'s five, and the shortest preamble `RadioLib`
+/// recommends. A model parameter, not a fact about the chip, to be calibrated
+/// on hardware (D16); what the configured preamble has beyond it is how late a
+/// listener may start.
+const PREAMBLE_SYMBOLS_TO_LOCK: u16 = 6;
+/// The least a late listener is forgiven, as wall time: scheduling jitter when
+/// a test compresses time a hundredfold.
 const LATE_TOLERANCE_FLOOR: Duration = Duration::from_millis(5);
 /// What the instantaneous RSSI reports when nothing is on the air.
 const IDLE_RSSI_DBM: i16 = -117;
@@ -616,12 +623,17 @@ impl Chip {
         self.scaled(Duration::from_micros(u64::from(micros)))
     }
 
-    /// How late a receiver may start listening and still catch a frame.
+    /// How late a receiver may start listening and still catch a frame: the
+    /// configured preamble, less the symbols a lock needs.
     fn late_tolerance(&self, model: &Model) -> Duration {
         let symbol = model.modulation.map_or(Duration::from_millis(8), |params| {
             Duration::from_micros(u64::from(params.symbol_duration_us()))
         });
-        (self.scaled(symbol) * 2).max(LATE_TOLERANCE_FLOOR)
+        let spare = model
+            .packet
+            .preamble_symbols
+            .saturating_sub(PREAMBLE_SYMBOLS_TO_LOCK);
+        (self.scaled(symbol) * u32::from(spare)).max(LATE_TOLERANCE_FLOOR)
     }
 
     /// A frame has just ended at this receiver. It is received if the chip was

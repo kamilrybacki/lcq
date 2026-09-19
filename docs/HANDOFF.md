@@ -319,9 +319,9 @@ property it always meant: no receiver verifies a frame it already had.
    `HeaderErr` next to `CrcErr` in telemetry (neither may reach the parser);
    make capture time-aware -- acquisition window against payload lock, the
    LoRaSim rule as the start -- with its parameters in the profile, not a
-   global 6 dB; derive the late-listener threshold from the configured
-   preamble rather than a constant, with boundary tests at 1, 2 and 3 symbols
-   and two preamble lengths; give CAD a deliberately simple, profiled state
+   global 6 dB (the late-listener threshold is already derived from the
+   configured preamble -- six symbols to lock, boundary tests at two preamble
+   lengths -- and a CRC-failed frame is telemetry on both adapters); give CAD a deliberately simple, profiled state
    machine (`CadDone` with and without `CadDetected`, weak, no match) but
    never "any frame in flight means detected"; and expose the `chip_missed`
    counters as a metric the suite watches. On hardware: measure `SetTx` to

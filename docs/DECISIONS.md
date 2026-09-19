@@ -1085,9 +1085,12 @@ What the chip model asserts, and what it leaves out:
   and packet parameters -- the same AN1200.13 formula `sim::channel::airtime_ms`
   uses, so hub and chip agree on when a frame ends. Timed receives run in
   15.625 µs ticks. Both are divided by the test's time scale.
-- Deafness: a frame is received only if the chip was in receive mode from no
-  later than two symbols after the frame started (floor 5 ms wall time, for
-  tests that compress time a hundredfold). TX, standby and sleep hear nothing,
+- Deafness: a frame is received only if the chip was in receive mode before
+  the frame's preamble had fewer than six symbols left -- a model parameter,
+  conservative against LoRaSim's five, so two symbols of slack on the
+  eight-symbol profile (floor 5 ms wall time, for tests that compress time a
+  hundredfold). Boundary tests at 1.5 and 2.5 symbols for eight, 5.5 and 6.5
+  for twelve. TX, standby and sleep hear nothing,
   and say so as `chip_missed` notes in the node's log.
 - Not modelled: capture timing (still the hub's power-only rule), CAD against
   real channel activity (the hub does not yet expose frames in flight, so CAD
