@@ -21,15 +21,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lcq::application::{Journal, OutgoingFrame};
-use lcq::domain::contracts::{CONSULTATION_CUTOFF_SECONDS, Opinion, Stage, Subject, Verdict};
+use std::collections::hash_map::RandomState;
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{BuildHasher, Hasher};
+
+use lcq::domain::contracts::{
+    BINDING_STAGE_OPENS_SECONDS, ENDORSEMENT_TARGET_SECONDS, Opinion, Stage, Subject, Verdict,
+};
 use lcq::domain::quorum::{Policy, evaluate};
-use lcq::domain::state::Case;
-use lcq::domain::time::{Clock, MAX_CLOCK_SKEW_SECONDS, Timestamp};
+use lcq::domain::state::{Case, TransitionError};
+use lcq::domain::time::{Clock, Timestamp};
 use lcq::infrastructure::{LogJournal, ScaledClock};
 use lcq::sim::airtime_ms;
 use lcq::wire::{
-    CompactEnvelope, GroupKey, Heard, SigningKey, VerifyingKey, decode_compact, encode_compact,
-    open_frame, seal_frame,
+    CompactEnvelope, GroupKey, Heard, MAX_FRAME_BYTES, RoundId, SigningKey, VerifyingKey,
+    decode_compact, encode_compact, open_frame, peek_frame_header, seal_frame,
 };
 
 /// Every node in a run derives the same group key from this.
@@ -47,6 +53,37 @@ const CONTENT_HASH: [u8; 32] = [0x22; 32];
 /// process spawn jitter, and under a scaled clock that jitter is multiplied by
 /// the scale.
 const TRIGGER_STAGE: u8 = 0;
+
+/// The subject's manifest identity, as every frame carries it.
+const MISSION_EPOCH: u16 = 1;
+const EVENT: u32 = 1;
+const REVISION: u16 = 0;
+
+/// Whether a frame is about the subject this node is deliberating.
+///
+/// Without this, an utterance about some other claim -- another event, another
+/// revision, different content -- would be admitted as if it were about ours,
+/// because the receiver builds the opinion from its own subject. The state
+/// machine's own subject check can only catch what the receiver hands it.
+fn same_subject(envelope: &CompactEnvelope, subject: &Subject) -> bool {
+    envelope.mission_epoch() == MISSION_EPOCH
+        && envelope.event() == EVENT
+        && envelope.revision() == REVISION
+        && envelope.content_hash() == subject.content_hash()
+        && envelope.started_at() == subject.started_at().as_secs()
+}
+
+/// A random offset from the operating system's entropy, in `[0, bound)`.
+///
+/// For retransmissions once a split is known. Not a seeded generator: an
+/// adversary who can predict when a member repeats itself can be waiting there,
+/// and the whole point of leaving the slot schedule is to take that away.
+fn entropy_below(bound: u64) -> u64 {
+    if bound == 0 {
+        return 0;
+    }
+    RandomState::new().build_hasher().finish() % bound
+}
 
 // A binary's entry point, and a linear one: open the journal, join the
 // channel, run the round, report. Splitting it further would move steps behind
@@ -97,6 +134,39 @@ fn main() {
     // acknowledgement costs eight bytes rather than a frame of its own.
     let mut heard = Heard::none();
     let mut acknowledged = false;
+    // The round this node joined, and whether anybody turned out to be in a
+    // different one. Signatures do not stop a member saying two things, so a
+    // compromised opener can leave halves of a fleet counting slots from
+    // different instants. It cannot fabricate a quorum, but the halves collide
+    // with each other until somebody notices.
+    let mut round = RoundId::none();
+    let mut split = false;
+    // Members whose verified frames disagreed with our round, by label or by
+    // timing. One such member proves nothing: a vote's round label is written
+    // by the voter, so a single compromised member could stamp a foreign label
+    // on its own frames and push the whole fleet off its slots. Two independent
+    // members are the threshold, which a lone liar cannot reach.
+    let mut foreign: BTreeSet<usize> = BTreeSet::new();
+    // The conflicting openings themselves, kept whole: a round label says two
+    // things were said, the signed frames say what.
+    let mut evidence: Vec<Vec<u8>> = Vec::new();
+    // When each stage's next attempt is due. Fixed once per attempt, so a
+    // randomised retry does not move under the loop's feet.
+    let mut next_due: [Option<Instant>; 3] = [None; 3];
+    // Binding votes that arrived before this node had closed consultation.
+    // Under a split -- or for a member well behind on its clock -- another
+    // member's binding slot can come round while we are still consulting, and
+    // the state machine rightly refuses a binding vote in that phase. Refusing
+    // is not the same as forgetting: the vote is held, one per member, and
+    // offered again the moment consultation closes. Nothing about safety
+    // changes, since the state machine checks it then exactly as it would have.
+    let mut early: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    // Highest sequence verified from each member. A frame at or below it is a
+    // retransmission or a replay, and either way already known, so it is
+    // dropped before paying for decryption and a signature check. Advanced only
+    // after the signature verifies: the cleartext header is a claim, and anyone
+    // holding the group key could otherwise poison the window with forgeries.
+    let mut last_seen: Vec<Option<u64>> = vec![None; options.fleet];
     let mut attempts = [0usize; 3];
 
     let stage_window = options.stage_window_s();
@@ -107,12 +177,29 @@ fn main() {
     let starts = [
         lead_in,
         lead_in + stage_window,
-        CONSULTATION_CUTOFF_SECONDS + MAX_CLOCK_SKEW_SECONDS + 1,
+        // Not `cutoff + skew`: that is when the member furthest AHEAD has
+        // closed. The one furthest behind closes a whole skew budget later,
+        // and until then it would skip its slot and fire into somebody else's.
+        BINDING_STAGE_OPENS_SECONDS + 1,
     ];
     // The binding stage has to be long enough for every attempt it allows,
     // or the run ends before the retries it was configured for and the
     // measurement is of the window rather than of anything else.
     let finish = starts[2] + stage_window * options.attempts.max(1) as u64 + 5;
+    // The whole schedule -- every stage, every allowed attempt -- has to fit
+    // before endorsement is expected. A binding stage that may legally begin
+    // but cannot finish is not a schedule, and finding that out mid-round is
+    // too late to do anything about it.
+    if finish > ENDORSEMENT_TARGET_SECONDS {
+        report(
+            &options,
+            &clock,
+            &format!(
+                "{{\"event\":\"schedule_unfit\",\"finish_s\":{finish},\"target_s\":{ENDORSEMENT_TARGET_SECONDS}}}"
+            ),
+        );
+        std::process::exit(2);
+    }
 
     // Transmission times are wall-clock instants, not whole protocol seconds.
     // A frame is 1.3 protocol seconds long, so scheduling to the second puts
@@ -129,21 +216,24 @@ fn main() {
         .collect();
 
     loop {
-        let now = clock.now().as_secs().saturating_sub(options.epoch);
-
         // The originator opens the round, then anchors on its own frame. It
         // waits first: a member that opens a round before the fleet is even
         // listening has opened it for nobody.
-        if began.is_none()
-            && options.trigger
-            && started.elapsed() >= Duration::from_millis(options.trigger_delay_ms)
-        {
+        if began.is_none() && started.elapsed() >= options.open_deadline(&clock) {
+            // The round is named by this very frame: who sends it, under which
+            // sequence. Read before the reservation so the two agree, and
+            // checked by every receiver against the frame's own header.
+            round = RoundId::new(
+                u16::try_from(options.index).unwrap_or(u16::MAX),
+                u32::try_from(journal.next_sequence()).unwrap_or(u32::MAX),
+            );
             let bytes = build_trigger(
                 &subject,
                 &keys[options.index],
                 &group,
                 &mut journal,
                 &options,
+                round,
             );
             if let Ok(bytes) = bytes {
                 // The anchor is when the trigger ENDS, not when it starts.
@@ -166,15 +256,59 @@ fn main() {
             // Nothing to schedule against yet: the only thing worth doing is
             // listening for the frame that opens the round.
             if let Some(frame) = link.poll()
-                && is_trigger(&frame, &group)
+                && !is_replay(&frame, &last_seen)
             {
-                began = Some(Instant::now());
-                clock = ScaledClock::new(epoch, options.scale, options.offset);
-                report(
-                    &options,
-                    &clock,
-                    "{\"event\":\"triggered\",\"by\":\"heard\"}",
-                );
+                if let Some((opened, opener, sequence)) =
+                    trigger_round(&frame, &group, &manifest, &subject)
+                {
+                    last_seen[opener] = Some(sequence);
+                    round = opened;
+                    began = Some(Instant::now());
+                    clock = ScaledClock::new(epoch, options.scale, options.offset);
+                    report(
+                        &options,
+                        &clock,
+                        "{\"event\":\"triggered\",\"by\":\"heard\"}",
+                    );
+                } else if let Some(late) = late_anchor(
+                    &frame, &group, &manifest, &subject, &starts, &options, &clock,
+                ) {
+                    // The opening was missed -- lost on the air, or this node
+                    // was not yet running -- but a vote was heard, and the
+                    // schedule is deterministic: the vote's sender and stage
+                    // say exactly when the round began. Waiting for a trigger
+                    // that has already gone would mean never joining.
+                    last_seen[late.author] = Some(late.sequence);
+                    round = late.round;
+                    began = Some(late.origin);
+                    clock =
+                        ScaledClock::anchored_at(late.origin, epoch, options.scale, options.offset);
+                    report(
+                        &options,
+                        &clock,
+                        &format!(
+                            "{{\"event\":\"triggered\",\"by\":\"derived\",\"from\":{}}}",
+                            late.author
+                        ),
+                    );
+                    // A binding vote heard this way must not be lost to the
+                    // phase check: close consultation first if the clock says
+                    // it is due, then admit the very frame that anchored us.
+                    if clock.certainly_after(subject.consultation_cutoff())
+                        && case.close_consultation(&clock).is_ok()
+                    {
+                        closed = true;
+                    }
+                    let learned = admit(
+                        &frame, &subject, &manifest, &group, &mut case, &clock, &options,
+                    );
+                    if let Some(from) = learned.binding_from {
+                        heard.heard_from(from);
+                    }
+                    if learned.acknowledges_us && !options.ignore_acks {
+                        acknowledged = true;
+                    }
+                }
             }
             thread::sleep(Duration::from_millis(1));
             continue;
@@ -186,6 +320,17 @@ fn main() {
                 Ok(()) => {
                     closed = true;
                     report(&options, &clock, "{\"event\":\"consultation_closed\"}");
+                    for (_, held) in std::mem::take(&mut early) {
+                        let learned = admit(
+                            &held, &subject, &manifest, &group, &mut case, &clock, &options,
+                        );
+                        if let Some(from) = learned.binding_from {
+                            heard.heard_from(from);
+                        }
+                        if learned.acknowledges_us && !options.ignore_acks {
+                            acknowledged = true;
+                        }
+                    }
                 }
                 Err(error) => report(
                     &options,
@@ -214,14 +359,37 @@ fn main() {
             if attempts[index] >= allowed || sent[index] {
                 continue;
             }
-            let due = anchor
-                + Duration::from_millis(
-                    offsets[index] + attempts[index] as u64 * options.retry_gap_ms(&clock),
-                );
+            let due = next_due[index].unwrap_or(anchor + Duration::from_millis(offsets[index]));
             if Instant::now() < due {
                 continue;
             }
             if stage == Stage::BindingSupport && !closed {
+                continue;
+            }
+            let slot_wall = Duration::from_millis(clock.wall_ms(options.slot_ms()));
+            if Instant::now() > due + slot_wall {
+                // The slot has gone -- consultation closed late, or this node
+                // was busy. It is never caught up outside the slot: a late
+                // frame lands in whoever's slot is current, and a liveness
+                // problem for one member would become a collision for two. The
+                // attempt is spent and the next one waits for this member's
+                // own slot in the next window.
+                attempts[index] += 1;
+                next_due[index] = Some(
+                    anchor
+                        + Duration::from_millis(
+                            offsets[index] + attempts[index] as u64 * options.retry_gap_ms(&clock),
+                        ),
+                );
+                report(
+                    &options,
+                    &clock,
+                    &format!(
+                        "{{\"event\":\"slot_missed\",\"stage\":\"{}\",\"attempt\":{}}}",
+                        stage_name(stage),
+                        attempts[index]
+                    ),
+                );
                 continue;
             }
             if stage == Stage::BindingSupport && attempts[index] > 0 && acknowledged {
@@ -244,20 +412,40 @@ fn main() {
                 &mut journal,
                 &options,
                 heard,
+                round,
             ) {
                 Ok(bytes) => {
                     link.send(&bytes);
                     attempts[index] += 1;
+                    // The next attempt returns to this member's own slot in the
+                    // next window -- unless a split is known, in which case the
+                    // schedule is what is colliding and the retry goes to a
+                    // random point in the window instead.
+                    let jitter = if split {
+                        entropy_below(clock.wall_ms(options.stage_window_s() * 1_000))
+                    } else {
+                        0
+                    };
+                    next_due[index] = Some(
+                        anchor
+                            + Duration::from_millis(
+                                offsets[index]
+                                    + attempts[index] as u64 * options.retry_gap_ms(&clock)
+                                    + jitter,
+                            ),
+                    );
                     // A node needs no radio to know its own utterance, and the
                     // emulator does not echo. Without this its own binding vote
                     // is missing from its own tally -- which happened to clear
                     // the threshold for a fleet of five and would not have for
                     // any other size.
-                    let learned = admit(
-                        &bytes, &subject, &manifest, &group, &mut case, &clock, &options,
-                    );
-                    if let Some(from) = learned.binding_from {
-                        heard.heard_from(from);
+                    if attempts[index] == 1 {
+                        let learned = admit(
+                            &bytes, &subject, &manifest, &group, &mut case, &clock, &options,
+                        );
+                        if let Some(from) = learned.binding_from {
+                            heard.heard_from(from);
+                        }
                     }
                     if allowed == 1 {
                         sent[index] = true;
@@ -292,11 +480,66 @@ fn main() {
         // its own slot because it was busy reading is a node that collides with
         // whoever comes next.
         if let Some(frame) = link.poll()
-            && !is_trigger(&frame, &group)
+            && !is_replay(&frame, &last_seen)
         {
+            if let Some((other, opener, sequence)) =
+                trigger_round(&frame, &group, &manifest, &subject)
+            {
+                last_seen[opener] = Some(sequence);
+                if other != round {
+                    // A second, validly signed opening for the same subject.
+                    // Signatures do not stop a member saying two things; what
+                    // they give is evidence, and the whole frame is kept as
+                    // such. Whether it changes anything is decided below, by
+                    // how many independent members disagree with us.
+                    if evidence.len() < 4 {
+                        evidence.push(frame.clone());
+                    }
+                    foreign.insert(opener);
+                }
+                split = note_split(split, &foreign, round, &options, &clock);
+                continue;
+            }
             let learned = admit(
                 &frame, &subject, &manifest, &group, &mut case, &clock, &options,
             );
+            if let Some((from, sequence)) = learned.verified {
+                last_seen[from] = Some(sequence);
+                if learned.refused == Some(TransitionError::WrongStageForPhase)
+                    && learned.stage_index == Some(2)
+                {
+                    early.insert(from, frame.clone());
+                }
+            }
+            if let Some((from, _)) = learned.verified {
+                let by_label = learned.round.is_set() && learned.round != round;
+                // A vote's timing implies where its sender thinks the round
+                // began. Off by more than a slot means it is counting from a
+                // different instant than we are -- the same split, seen from
+                // its effect rather than its label, which is the only way it
+                // shows when both halves carry the same label.
+                let by_timing = options.slots
+                    && learned.stage_index.is_some_and(|s| {
+                        let travel = Duration::from_millis(clock.wall_ms(
+                            starts[s] * 1_000
+                                + options.slot_ms() * from as u64
+                                + airtime_ms(frame.len()),
+                        ));
+                        let implied = Instant::now().checked_sub(travel);
+                        implied.is_some_and(|at| {
+                            let drift = if at > anchor {
+                                at - anchor
+                            } else {
+                                anchor - at
+                            };
+                            drift > Duration::from_millis(clock.wall_ms(options.slot_ms()))
+                        })
+                    });
+                if by_label || by_timing {
+                    foreign.insert(from);
+                }
+                split = note_split(split, &foreign, round, &options, &clock);
+            }
             if let Some(from) = learned.binding_from {
                 heard.heard_from(from);
             }
@@ -309,7 +552,26 @@ fn main() {
             }
         }
 
-        if now >= finish {
+        // The schedule lives on the anchor's timeline, not on this node's
+        // clock: a member fifteen seconds ahead would otherwise decide the
+        // round was over before its own binding slot. Only the subject's own
+        // deadlines belong to the local clock, and the state machine applies
+        // those itself. Listening stops when endorsement is expected, or
+        // earlier once this node has nothing left to send and has seen a
+        // quorum -- never merely because its own frames are out.
+        let horizon =
+            anchor + Duration::from_millis(clock.wall_ms(ENDORSEMENT_TARGET_SECONDS * 1_000));
+        // Not "as soon as a quorum is seen": that is reached on the fourth
+        // vote of five, with the fifth member's slot still to come, and a node
+        // that left then would report four. The scheduled window has to have
+        // run its course first, so every member's slot has had its turn.
+        let scheduled_end = anchor + Duration::from_millis(clock.wall_ms(finish * 1_000));
+        let endorsed_now = Instant::now() >= scheduled_end && {
+            let supporters: Vec<String> =
+                case.binding_supporters().map(ToString::to_string).collect();
+            evaluate(&policy, supporters).is_ok_and(|o| o.approved())
+        };
+        if Instant::now() >= horizon || endorsed_now {
             break;
         }
         // Finer than the shortest thing being timed: a frame at scale 100 is
@@ -334,6 +596,7 @@ fn main() {
 }
 
 /// Build this node's frame for a stage, journalling a binding vote first.
+#[allow(clippy::too_many_arguments)]
 ///
 /// On a restart the lock is already held, so the committed frame is resent from
 /// the outbox rather than rebuilt: the lock stops a second *decision*, never a
@@ -346,6 +609,7 @@ fn build(
     journal: &mut LogJournal,
     options: &Options,
     heard: Heard,
+    round: RoundId,
 ) -> Result<Vec<u8>, String> {
     let voter = member_id(options.index);
     if stage == Stage::BindingSupport && journal.has_voted(subject, &voter) {
@@ -371,9 +635,18 @@ fn build(
         1,
         sequence,
     )
-    .acknowledging(heard);
+    .acknowledging(heard)
+    .in_round(round);
     let signed = encode_compact(&envelope.sign(&keys[options.index])).map_err(|e| e.to_string())?;
     let sealed = seal_frame(group, author, sequence, &signed).map_err(|e| e.to_string())?;
+    if sealed.len() > MAX_FRAME_BYTES {
+        // The slot is sized to MAX_FRAME_BYTES. A wider frame would overrun
+        // into the next member's slot, so it is not sent at all.
+        return Err(format!(
+            "frame is {} B, over the {MAX_FRAME_BYTES} B a slot is sized for",
+            sealed.len()
+        ));
+    }
 
     if stage == Stage::BindingSupport {
         // Lock and outbox entry commit together, before the bytes leave here.
@@ -395,6 +668,7 @@ fn build_trigger(
     group: &GroupKey,
     journal: &mut LogJournal,
     options: &Options,
+    round: RoundId,
 ) -> Result<Vec<u8>, String> {
     let sequence = journal
         .reserve_sequence()
@@ -410,17 +684,139 @@ fn build_trigger(
         TRIGGER_STAGE,
         0,
         sequence,
-    );
+    )
+    .in_round(round);
     let signed = encode_compact(&envelope.sign(key)).map_err(|e| e.to_string())?;
     seal_frame(group, author, sequence, &signed).map_err(|e| e.to_string())
 }
 
 /// Whether a frame is a round opener rather than an utterance.
-fn is_trigger(sealed: &[u8], group: &GroupKey) -> bool {
-    let Ok((_, _, plain)) = open_frame(group, sealed) else {
-        return false;
+/// Decide whether the disagreements seen so far amount to a split, once.
+fn note_split(
+    already: bool,
+    foreign: &BTreeSet<usize>,
+    round: RoundId,
+    options: &Options,
+    clock: &impl Clock,
+) -> bool {
+    if already || foreign.len() < 2 {
+        return already;
+    }
+    let members: Vec<String> = foreign.iter().map(ToString::to_string).collect();
+    report(
+        options,
+        clock,
+        &format!(
+            "{{\"event\":\"split\",\"round\":[{},{}],\"disagreeing\":[{}]}}",
+            round.opener(),
+            round.sequence(),
+            members.join(",")
+        ),
+    );
+    true
+}
+
+/// When a round began, worked out from a vote heard inside it.
+struct LateAnchor {
+    origin: Instant,
+    round: RoundId,
+    author: usize,
+    sequence: u64,
+}
+
+/// Derive the round's anchor from a verified in-round frame.
+///
+/// Only under slotted access, where a member's transmission time is a pure
+/// function of its index and the stage; under random contention there is
+/// nothing to derive from. The emulator -- and a radio -- hands over a frame
+/// when it ends, so the anchor sits one airtime plus the sender's offset
+/// before the moment of receipt.
+fn late_anchor(
+    sealed: &[u8],
+    group: &GroupKey,
+    manifest: &[VerifyingKey],
+    subject: &Subject,
+    starts: &[u64; 3],
+    options: &Options,
+    clock: &ScaledClock,
+) -> Option<LateAnchor> {
+    if !options.slots {
+        return None;
+    }
+    let (header_author, header_sequence, plain) = open_frame(group, sealed).ok()?;
+    let frame = decode_compact(&plain).ok()?;
+    let envelope = frame.envelope();
+    let stage_index = match envelope.stage() {
+        1 => 0,
+        2 => 1,
+        3 => 2,
+        _ => return None,
     };
-    decode_compact(&plain).is_ok_and(|f| f.envelope().stage() == TRIGGER_STAGE)
+    let author = usize::from(envelope.author_index());
+    if !same_subject(envelope, subject)
+        || author >= manifest.len()
+        || frame.verify(&manifest[author]).is_err()
+        || usize::from(header_author) != author
+        || header_sequence != envelope.sequence()
+        || !envelope.round().is_set()
+    {
+        return None;
+    }
+    let protocol_ms =
+        starts[stage_index] * 1_000 + options.slot_ms() * author as u64 + airtime_ms(sealed.len());
+    let origin = Instant::now().checked_sub(Duration::from_millis(clock.wall_ms(protocol_ms)))?;
+    Some(LateAnchor {
+        origin,
+        round: envelope.round(),
+        author,
+        sequence: envelope.sequence(),
+    })
+}
+
+/// Whether a frame repeats a sequence already verified from its sender.
+fn is_replay(frame: &[u8], last_seen: &[Option<u64>]) -> bool {
+    peek_frame_header(frame).is_ok_and(|(author, sequence)| {
+        last_seen
+            .get(usize::from(author))
+            .copied()
+            .flatten()
+            .is_some_and(|seen| sequence <= seen)
+    })
+}
+
+/// The round a frame opens, if it opens one -- and only if it is genuine.
+///
+/// Holding the group key gets a frame decrypted; it does not make its author
+/// anybody in particular. An opening that is not signed by the member it
+/// claims to be from would let any member open rounds as any other, so the
+/// signature is checked here exactly as it is for a vote. The round is then
+/// bound to the frame itself: named by the very member and sequence that sent
+/// it, so there is nothing to forge and nothing to collide.
+fn trigger_round(
+    sealed: &[u8],
+    group: &GroupKey,
+    manifest: &[VerifyingKey],
+    subject: &Subject,
+) -> Option<(RoundId, usize, u64)> {
+    let (header_author, header_sequence, plain) = open_frame(group, sealed).ok()?;
+    let frame = decode_compact(&plain).ok()?;
+    let envelope = frame.envelope();
+    if envelope.stage() != TRIGGER_STAGE || !same_subject(envelope, subject) {
+        return None;
+    }
+    let claimed = usize::from(envelope.author_index());
+    if claimed >= manifest.len() || frame.verify(&manifest[claimed]).is_err() {
+        return None;
+    }
+    if usize::from(header_author) != claimed || header_sequence != envelope.sequence() {
+        return None;
+    }
+    let round = envelope.round();
+    if usize::from(round.opener()) != claimed || u64::from(round.sequence()) != envelope.sequence()
+    {
+        return None;
+    }
+    Some((round, claimed, envelope.sequence()))
 }
 
 /// Open, verify and offer a received frame to the state machine.
@@ -434,13 +830,28 @@ fn admit(
     options: &Options,
 ) -> Admitted {
     let mut learned = Admitted::default();
-    let Ok((_, _, plain)) = open_frame(group, sealed) else {
+    let Ok((header_author, header_sequence, plain)) = open_frame(group, sealed) else {
         return learned;
     };
     let Ok(received) = decode_compact(&plain) else {
         return learned;
     };
+    if !same_subject(received.envelope(), subject) {
+        report(
+            options,
+            clock,
+            "{\"event\":\"refused\",\"why\":\"subject\"}",
+        );
+        return learned;
+    }
     let claimed = received.envelope().author_index() as usize;
+    // The header is authenticated by the seal and the envelope by the
+    // signature; a frame whose two authors disagree was assembled by somebody
+    // with the group key and not the member's key, and is refused whole.
+    if usize::from(header_author) != claimed || header_sequence != received.envelope().sequence() {
+        report(options, clock, "{\"event\":\"refused\",\"why\":\"header\"}");
+        return learned;
+    }
     if claimed >= manifest.len() || received.verify(&manifest[claimed]).is_err() {
         report(
             options,
@@ -452,6 +863,14 @@ fn admit(
     // Whatever the state machine decides about the utterance, the sender's
     // report of who IT heard is signed and worth reading -- that is the whole
     // point of carrying it.
+    learned.verified = Some((claimed, received.envelope().sequence()));
+    learned.round = received.envelope().round();
+    learned.stage_index = match received.envelope().stage() {
+        1 => Some(0),
+        2 => Some(1),
+        3 => Some(2),
+        _ => None,
+    };
     learned.acknowledges_us = received.envelope().heard().contains(options.index);
     let (Some(stage), Some(verdict)) = (
         stage_of(received.envelope().stage()),
@@ -474,11 +893,14 @@ fn admit(
                 ),
             );
         }
-        Err(error) => report(
-            options,
-            clock,
-            &format!("{{\"event\":\"refused\",\"from\":{claimed},\"why\":\"{error}\"}}"),
-        ),
+        Err(error) => {
+            learned.refused = Some(error);
+            report(
+                options,
+                clock,
+                &format!("{{\"event\":\"refused\",\"from\":{claimed},\"why\":\"{error}\"}}"),
+            );
+        }
     }
     learned
 }
@@ -486,10 +908,18 @@ fn admit(
 /// What reading one frame taught this node.
 #[derive(Debug, Default, Clone, Copy)]
 struct Admitted {
+    /// The signature verified: which member, under which sequence.
+    verified: Option<(usize, u64)>,
+    /// The round the sender declared it was in.
+    round: RoundId,
+    /// Which stage the frame belonged to, as an index into the schedule.
+    stage_index: Option<usize>,
     /// A binding vote was admitted from this member.
     binding_from: Option<usize>,
     /// The sender reports having heard us, so we need not repeat ourselves.
     acknowledges_us: bool,
+    /// Why the state machine refused the utterance, if it did.
+    refused: Option<TransitionError>,
 }
 
 /// The socket to the channel emulator, with its reader on its own thread.
@@ -587,9 +1017,12 @@ impl Options {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(200),
             trigger: args.iter().any(|a| a == "--trigger"),
+            // Not zero. A member that opens a round the instant it boots opens
+            // it for nobody, and under distributed opening every member is a
+            // potential opener.
             trigger_delay_ms: value("--trigger-delay-ms")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+                .unwrap_or(5_000),
             attempts: value("--attempts")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1),
@@ -606,8 +1039,32 @@ impl Options {
         }
     }
 
+    /// Width of one slot in protocol milliseconds: the widest frame the
+    /// protocol can send, plus the guard. Sized to the constant, never to the
+    /// frame in hand, so adding a field can only make a sender refuse.
     fn slot_ms(&self) -> u64 {
-        airtime_ms(137) + self.guard_ms
+        airtime_ms(MAX_FRAME_BYTES) + self.guard_ms
+    }
+
+    /// How long after start this member opens the round itself, unless it has
+    /// heard an opening by then.
+    ///
+    /// Any member may open, so no single one is a point of failure. They take
+    /// turns rather than racing: the order rotates with the subject's content
+    /// so the same low index does not open every round -- a compromised member
+    /// that always opened first would be the fleet's de facto scheduler -- and
+    /// each waits two slot widths longer than the one before, enough for the
+    /// previous member's opening to be heard before the next is sent. Explicit
+    /// `--trigger` puts a member first, for harnesses that need to know who.
+    fn open_deadline(&self, clock: &ScaledClock) -> Duration {
+        let base = Duration::from_millis(self.trigger_delay_ms);
+        if self.trigger {
+            return base;
+        }
+        let start = usize::from(CONTENT_HASH[0]) % self.fleet.max(1);
+        let rank = (self.index + self.fleet - start) % self.fleet.max(1);
+        let turn = clock.wall_ms(2 * self.slot_ms());
+        base + Duration::from_millis((rank as u64 + 1) * turn)
     }
 
     /// Wall milliseconds between retransmissions: one whole round, so a repeat

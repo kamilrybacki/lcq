@@ -343,10 +343,10 @@ fn the_acknowledgement_is_covered_by_the_signature() {
         "the bitmap must change what is signed"
     );
     // And a frame whose bitmap was rewritten after signing no longer verifies.
-    let signed = base.clone().acknowledging(heard).sign(&signer);
-    let bytes = encode_compact(&signed).expect("encodes");
-    let tampered = decode_compact(&bytes).expect("decodes");
-    assert!(tampered.verify(&signer.verifying_key()).is_ok());
+    let acknowledging = base.clone().acknowledging(heard).sign(&signer);
+    let bytes = encode_compact(&acknowledging).expect("encodes");
+    let decoded = decode_compact(&bytes).expect("decodes");
+    assert!(decoded.verify(&signer.verifying_key()).is_ok());
     let forged = base.acknowledging(Heard::none()).sign(&signer);
     assert_ne!(
         encode_compact(&forged).expect("encodes"),
@@ -368,4 +368,95 @@ fn an_acknowledgement_survives_the_round_trip() {
     let back = decode_compact(&bytes).expect("decodes");
     assert_eq!(back.envelope().heard(), heard);
     assert!(back.verify(&signer.verifying_key()).is_ok());
+}
+
+#[test]
+fn the_header_can_be_read_without_opening_the_frame() {
+    use lcq::wire::{GroupKey, peek_frame_header, seal_frame};
+
+    let group = GroupKey::from_bytes([0x5a; 32]);
+    let frame = seal_frame(&group, 9, 777, b"anything").expect("seals");
+    assert_eq!(peek_frame_header(&frame).expect("peeks"), (9, 777));
+    assert!(peek_frame_header(&frame[..5]).is_err());
+}
+
+#[test]
+fn a_round_is_named_by_who_opened_it_and_under_which_sequence() {
+    use lcq::wire::{CompactEnvelope, RoundId, decode_compact};
+
+    let signer = SigningKey::from_seed([1; 32]);
+    let round = RoundId::new(3, 41);
+    assert!(round.is_set());
+    assert!(!RoundId::none().is_set());
+    assert_ne!(
+        round,
+        RoundId::new(3, 42),
+        "same opener, next sequence: a different round"
+    );
+    assert_ne!(
+        round,
+        RoundId::new(4, 41),
+        "same sequence, other opener: a different round"
+    );
+
+    let labelled = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1).in_round(round);
+    let bytes = encode_compact(&labelled.sign(&signer)).expect("encodes");
+    let back = decode_compact(&bytes).expect("decodes");
+    assert_eq!(back.envelope().round(), round);
+    assert!(back.verify(&signer.verifying_key()).is_ok());
+}
+
+#[test]
+fn the_round_is_covered_by_the_signature() {
+    // Otherwise a vote cast in one round could be lifted into another.
+    use lcq::wire::{CompactEnvelope, RoundId};
+
+    let base = CompactEnvelope::new(1, 1, 0, [0; 32], 0, 1, 3, 1, 1);
+    assert_ne!(
+        base.transcript(),
+        base.in_round(RoundId::new(0, 1)).transcript()
+    );
+}
+
+#[test]
+fn the_widest_possible_frame_fits_the_slot_it_is_sized_for() {
+    // Every varint at its longest encoding, every acknowledgement bit set, a
+    // round label at its maximum: nothing the protocol can legally send is
+    // wider than this. The slot is sized to MAX_FRAME_BYTES, so this is the
+    // frame that must fit -- and the constant must not be loose enough to hide
+    // a field that quietly grew.
+    use lcq::wire::{CompactEnvelope, GroupKey, Heard, MAX_FRAME_BYTES, RoundId, seal_frame};
+
+    let signer = SigningKey::from_seed([1; 32]);
+    let group = GroupKey::from_bytes([9; 32]);
+    let mut heard = Heard::none();
+    for i in 0..Heard::CAPACITY {
+        heard.heard_from(i);
+    }
+    let widest = CompactEnvelope::new(
+        u16::MAX,
+        u32::MAX,
+        u16::MAX,
+        [0xFF; 32],
+        u64::MAX,
+        u16::MAX,
+        u8::MAX,
+        u8::MAX,
+        u64::MAX,
+    )
+    .acknowledging(heard)
+    .in_round(RoundId::new(u16::MAX - 1, u32::MAX));
+    let bytes = encode_compact(&widest.sign(&signer)).expect("encodes");
+    let on_air = seal_frame(&group, u16::MAX, u64::MAX, &bytes).expect("seals");
+
+    assert!(
+        on_air.len() <= MAX_FRAME_BYTES,
+        "widest frame is {} B, over the {MAX_FRAME_BYTES} B slot",
+        on_air.len()
+    );
+    assert!(
+        on_air.len() + 8 >= MAX_FRAME_BYTES,
+        "slot is {MAX_FRAME_BYTES} B for a {} B frame: too loose to catch growth",
+        on_air.len()
+    );
 }

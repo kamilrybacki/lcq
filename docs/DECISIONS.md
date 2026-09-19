@@ -598,3 +598,121 @@ The binding stage ended before the retries it was configured for, so the first
 measurement was of the stage window rather than of acknowledgement — both fleets
 spent nine attempts and the difference was invisible. The stage is now long
 enough for every attempt it allows.
+
+---
+
+## D9 — Reliability hardening: what a second review and real processes found
+
+**Decided and measured 2026-09-19.** Prompted by "the protocol has to be
+reliable", taken as three separate questions: does it never fabricate a quorum
+(safety), does it reach a verdict when honest members can hear each other
+(liveness), and does it survive crashes, skew and malicious members inside the
+fault budget (robustness). An independent review contributed several of the
+points below; where it changed the design that is said.
+
+### Safety
+
+* **Opening a round is the full admission path.** The trigger used to be
+  decrypted and its stage checked, nothing more, so any holder of the group
+  key could open rounds as any member. It is now verified like a vote: the
+  signature against the manifest, the cleartext header against the signed
+  envelope, the subject, and the replay window.
+* **Every frame is checked against the subject.** The receiver used to build
+  the opinion from its *own* subject, so an utterance about a different event,
+  revision or content would have been admitted as if it were about ours. The
+  state machine's subject check can only catch what the receiver hands it.
+* **The replay window advances only after the signature verifies.** The
+  cleartext header is a claim; advanced any earlier, anyone holding the group
+  key could poison a member's window with forged headers.
+* **`RoundId` is a transport label, never a security identity.** Review's
+  correction, and right: a compromised opener ignoring its journal can send two
+  triggers with the same `(index, sequence)` at different times, so the label
+  cannot prove anything. Votes bind to the subject and the journal allows one
+  per member whatever round they were cast in. The label organises transmission
+  and names evidence; the signed frames are the evidence.
+* **A frame wider than the slot is refused at the sender.** Slots are sized to
+  `MAX_FRAME_BYTES` (176, the widest legal frame with every field at its longest
+  encoding), never to the frame in hand, so a field added later can only make a
+  sender refuse rather than overrun its neighbour.
+* **A repeated non-binding opinion is the same opinion**, neither counted twice
+  nor refused as a fault.
+
+### Timing under skew
+
+* **The binding stage opens at `cutoff + 2·SKEW + PHASE_SETTLE`.** A member
+  closes consultation on its own clock once certainly past the cutoff, so the
+  one furthest behind closes a whole pairwise budget after the one furthest
+  ahead, and the slot schedule counts from a shared instant. The settle budget
+  is separate from skew on review's advice: it covers a strict comparison,
+  polling and turnaround, not clock disagreement.
+* **A missed slot is never caught up.** A member whose slot passed before it
+  closed spends the attempt and waits for its own slot in the next window. Firing
+  late lands in whoever's slot is current, turning one member's liveness problem
+  into two members' collision.
+* **The schedule lives on the anchor's timeline; only the subject's deadlines
+  live on the local clock.** Found by the skewed-fleet test: the member fifteen
+  seconds ahead decided the round was over before its own binding slot.
+* **Listening stops at the endorsement target, or after the scheduled window
+  once a quorum is seen — never at "my frames are out", and never at the fourth
+  vote of five.** Both were found by tests: the first left a split fleet half
+  deaf, the second reported four supporters with the fifth member's slot still
+  to come.
+* **A binding vote that arrives before this node has closed is held, not
+  dropped**, and offered again the moment consultation closes. Under a split
+  the halves' anchors differed by two minutes and one half was refusing every
+  vote from the other. Safety is unchanged: the state machine checks the held
+  vote exactly as it would have.
+
+### Liveness
+
+* **Any member may open a round.** Turns rotate with the subject's content, so
+  the same low index does not always open first — a member that always opened
+  would be the fleet's de facto scheduler — and each waits two slot widths
+  longer than the one before. Nobody opens the instant it boots. Measured with
+  the designated opener never launched: member 1 opened, four of four agreed.
+* **Split detection needs two independent members.** A vote's round label is
+  written by the voter, so one compromised member could stamp a foreign label
+  on its own frames and push the whole fleet off its slots. Review's threshold
+  was "two verified triggers"; that is too strict, because in a real split most
+  members never hear the second trigger — they hear the other half's votes. Two
+  distinct verified members disagreeing, by label or by timing implied from a
+  vote's arrival, is the threshold; a lone liar cannot reach it. Detection is
+  once per subject and never resets the anchor.
+* **After a split, retries are randomised from the operating system's
+  entropy.** In-slot retries would repeat the same collision every window; a
+  seeded generator would tell an adversary when to be waiting. Anchors are never
+  reconstructed or canonicalised — review argued against it and the argument
+  holds: reception time is not a shared clock, and "lowest label wins" invites a
+  member to send one.
+* **A member that missed the opening joins from the first vote it hears.** The
+  schedule is deterministic, so a vote's sender and stage say exactly when the
+  round began. Measured under 30 % loss, where the opening itself is lost to
+  some receivers: one member joined this way and quorum landed.
+
+### Measured, one container per vessel
+
+| scenario | result |
+|---|---|
+| clocks skewed by the full 30 s pairwise budget | 0 collisions, 5 / 5 |
+| designated opener never launched | member 1 opened, 4 / 4 |
+| halves isolated while the round opened | 2 openings, 5 / 5 detected the split, 0 collisions, quorum |
+| 30 % of deliveries dropped | 1 member joined without the opening, quorum |
+| twelve vessels | 12 / 12 in the same wall time as five |
+
+### What the harness taught
+
+Distributed opening with a zero default delay turned every test into several
+rounds, and the failures looked like protocol bugs. A member now waits five
+seconds by default; the harness gives waiting members eight. Isolation for the
+split scenario is measured from the first frame, not from emulator start,
+because the harness spends seconds launching. And every failing assertion now
+prints the refusals, missed slots and splits each vessel logged — the two
+timing bugs above were invisible as numbers and obvious as lines.
+
+### Still open
+
+Evidence is kept but not reported anywhere; there is no exclusion procedure.
+The opening backoff is rank-ordered on each member's own clock, so under skew
+two members can open within one airtime and collide — bounded by the fault
+budget, handled by detection, not eliminated. Per-sender rate limits on
+accepted triggers. Radio hardware.

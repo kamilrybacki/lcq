@@ -160,24 +160,42 @@ impl Sea {
 
     /// The channel everything shares.
     fn launch_hub(&mut self, fleet: usize) -> String {
+        self.launch_hub_with(fleet, &[])
+    }
+
+    /// The channel, with extra emulator arguments such as `--loss`.
+    ///
+    /// Never quiet: the emulator's log is where collisions are counted, and a
+    /// container test that cannot count them is not checking the schedule.
+    fn launch_hub_with(&mut self, fleet: usize, extra: &[&str]) -> String {
         let name = format!("{}-hub", self.network);
-        self.run(
-            &name,
-            &[],
-            &[
-                "/lcq-hub".to_string(),
-                "--bind".into(),
-                "0.0.0.0".into(),
-                "--port".into(),
-                "9000".into(),
-                "--fleet".into(),
-                fleet.to_string(),
-                "--scale".into(),
-                SCALE.into(),
-                "--quiet".into(),
-            ],
-        );
+        let mut command: Vec<String> = vec![
+            "/lcq-hub".to_string(),
+            "--bind".into(),
+            "0.0.0.0".into(),
+            "--port".into(),
+            "9000".into(),
+            "--fleet".into(),
+            fleet.to_string(),
+            "--scale".into(),
+            SCALE.into(),
+        ];
+        command.extend(extra.iter().map(ToString::to_string));
+        self.run(&name, &[], &command);
         name
+    }
+
+    /// How many frames the emulator destroyed by overlap so far.
+    fn collisions(hub: &str) -> usize {
+        Command::new("docker")
+            .args(["logs", hub])
+            .output()
+            .map_or(usize::MAX, |o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| l.contains("\"collision\""))
+                    .count()
+            })
     }
 
     /// One vessel, with a journal on a mount only it can see.
@@ -226,6 +244,12 @@ impl Sea {
             // fleet is listening. This only covers this container's own start.
             command.push("--trigger-delay-ms".into());
             command.push("1500".into());
+        } else {
+            // Any member may open once its turn comes; a waiting member's turn
+            // must not come before the designated opener has had its chance,
+            // or the test has several rounds where it meant to have one.
+            command.push("--trigger-delay-ms".into());
+            command.push("8000".into());
         }
         command.extend(extra.iter().map(ToString::to_string));
         let mount = format!("{}:/journal", journal_dir.display());
@@ -421,7 +445,7 @@ fn put_to_sea_with(sea: &mut Sea, fleet: usize, hub: &str, extra: &[&str]) -> Ve
         .collect();
     for ship in &ships {
         assert!(
-            ship.await_log("\"start\"", Duration::from_secs(60)),
+            ship.await_log("\"start\"", Duration::from_mins(1)),
             "jednostka {} nie wstala",
             ship.index
         );
@@ -496,6 +520,27 @@ fn put_to_sea(sea: &mut Sea, fleet: usize, hub: &str) -> Vec<Ship> {
     let opener = sea.launch_ship(0, fleet, hub, true);
     ships.insert(0, opener);
     ships
+}
+
+/// Print every line a vessel logged that says something went wrong, so a
+/// failing assertion comes with the reason instead of a number.
+fn note_anomalies(ships: &[Ship]) {
+    for ship in ships {
+        for line in ship.logs().lines().filter(|l| {
+            [
+                "\"refused\"",
+                "slot_missed",
+                "\"split\"",
+                "not_sent",
+                "schedule_unfit",
+                "\"derived\"",
+            ]
+            .iter()
+            .any(|needle| l.contains(needle))
+        }) {
+            note(&format!("    statek {}: {line}", ship.index));
+        }
+    }
 }
 
 fn note(line: &str) {
@@ -675,7 +720,7 @@ fn a_larger_fleet_costs_no_more_time_than_a_small_one() {
     let finals: Vec<Final> = ships
         .iter()
         .map(|ship| {
-            ship.await_final(Duration::from_secs(180))
+            ship.await_final(Duration::from_mins(3))
                 .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
         })
         .collect();
@@ -728,7 +773,7 @@ fn acknowledgement_stops_the_fleet_repeating_itself() {
     let deaf_finals: Vec<Final> = deaf
         .iter()
         .map(|ship| {
-            ship.await_final(Duration::from_secs(180))
+            ship.await_final(Duration::from_mins(3))
                 .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
         })
         .collect();
@@ -741,7 +786,7 @@ fn acknowledgement_stops_the_fleet_repeating_itself() {
     let finals: Vec<Final> = hearing
         .iter()
         .map(|ship| {
-            ship.await_final(Duration::from_secs(180))
+            ship.await_final(Duration::from_mins(3))
                 .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
         })
         .collect();
@@ -765,5 +810,235 @@ fn acknowledgement_stops_the_fleet_repeating_itself() {
     for (index, result) in finals.iter().enumerate() {
         assert_eq!(result.supporters, fleet, "statek {index} policzyl inaczej");
         assert!(result.endorsed);
+    }
+}
+
+#[test]
+fn a_fleet_with_skewed_clocks_still_agrees_without_colliding() {
+    use lcq::domain::time::MAX_CLOCK_SKEW_SECONDS;
+
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // Every earlier container run gave the fleet one clock. The protocol's own
+    // budget allows honest clocks to differ pairwise by MAX_CLOCK_SKEW_SECONDS,
+    // and the thing that breaks under skew is not the slot schedule -- that is
+    // anchored on the trigger -- but WHEN each member closes consultation, which
+    // is on its own clock. The member furthest behind must still have closed by
+    // its first binding slot, or it fires late into somebody else's.
+    let fleet = 5;
+    let half = i64::try_from(MAX_CLOCK_SKEW_SECONDS / 2).expect("fits");
+    let mut sea = Sea::new("skew").expect("sea");
+    let hub = sea.launch_hub(fleet);
+
+    let mut ships: Vec<Ship> = (1..fleet)
+        .map(|i| {
+            // Spread from -half to +half, so the widest pair differs by the
+            // whole budget. Which member gets which error is irrelevant.
+            let members = i64::try_from(fleet).expect("fits");
+            let offset = -half + (2 * half * i64::try_from(i).expect("fits")) / (members - 1);
+            sea.launch_ship_with(i, fleet, &hub, false, &["--offset", &offset.to_string()])
+        })
+        .collect();
+    for ship in &ships {
+        assert!(ship.await_log("\"start\"", Duration::from_mins(1)));
+    }
+    ships.insert(
+        0,
+        sea.launch_ship_with(0, fleet, &hub, true, &["--offset", &(-half).to_string()]),
+    );
+
+    let finals: Vec<Final> = ships
+        .iter()
+        .map(|ship| {
+            ship.await_final(Duration::from_mins(3))
+                .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
+        })
+        .collect();
+    let collisions = Sea::collisions(&hub);
+    note(&format!(
+        "  skos parami {MAX_CLOCK_SKEW_SECONDS} s: {} zderzen, poparc {} / prog {}",
+        collisions, finals[0].supporters, finals[0].threshold
+    ));
+    note_anomalies(&ships);
+
+    assert_eq!(
+        collisions, 0,
+        "skewed clocks must not put members into each other's slots"
+    );
+    for (index, result) in finals.iter().enumerate() {
+        assert_eq!(result.supporters, fleet, "statek {index} policzyl inaczej");
+        assert!(result.endorsed, "statek {index} nie zatwierdzil");
+    }
+}
+
+#[test]
+fn a_lossy_channel_is_survived_by_retransmission() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // Thirty per cent of deliveries dropped by the emulator, four attempts per
+    // binding vote. Loss also eats the trigger: a member that missed it must
+    // work out when the round began from the first vote it hears, or it never
+    // joins at all.
+    let fleet = 5;
+    let mut sea = Sea::new("loss").expect("sea");
+    let hub = sea.launch_hub_with(fleet, &["--loss", "0.3"]);
+    let ships = put_to_sea_with(&mut sea, fleet, &hub, &["--attempts", "4"]);
+
+    let finals: Vec<Final> = ships
+        .iter()
+        .map(|ship| {
+            ship.await_final(Duration::from_mins(4))
+                .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
+        })
+        .collect();
+    let attempts: usize = finals.iter().map(|f| f.binding_attempts).sum();
+    let late = ships
+        .iter()
+        .filter(|s| s.logs().contains("\"by\":\"derived\""))
+        .count();
+    note(&format!(
+        "  30% strat: {attempts} prob glosu, {late} jednostek dolaczylo bez wyzwalacza"
+    ));
+
+    assert!(attempts > fleet, "losses must have forced retransmissions");
+    for (index, result) in finals.iter().enumerate() {
+        assert!(
+            result.supporters >= result.threshold,
+            "statek {index}: {} poparc przy progu {}",
+            result.supporters,
+            result.threshold
+        );
+        assert!(result.endorsed, "statek {index} nie zatwierdzil");
+    }
+}
+
+#[test]
+fn a_fleet_whose_designated_opener_is_dead_still_opens_a_round() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // Nobody is told to open. Member 0 is never launched at all. The rest wait
+    // their rotated turn and whoever's turn comes first opens; everyone else
+    // hears it and joins. A single member that has to be alive for anything to
+    // happen is a single point of failure, and this is the check that there
+    // is none.
+    let fleet = 5;
+    let mut sea = Sea::new("noopener").expect("sea");
+    let hub = sea.launch_hub(fleet);
+    let ships: Vec<Ship> = (1..fleet)
+        .map(|i| sea.launch_ship_with(i, fleet, &hub, false, &["--trigger-delay-ms", "4000"]))
+        .collect();
+    for ship in &ships {
+        assert!(ship.await_log("\"start\"", Duration::from_mins(1)));
+    }
+
+    let finals: Vec<Final> = ships
+        .iter()
+        .map(|ship| {
+            ship.await_final(Duration::from_mins(3))
+                .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
+        })
+        .collect();
+    let openers = ships
+        .iter()
+        .filter(|s| s.logs().contains("\"by\":\"self\""))
+        .map(|s| s.index.to_string())
+        .collect::<Vec<_>>();
+    note(&format!(
+        "  bez wyznaczonego otwierajacego: otworzyl(y) {:?}, {} zderzen",
+        openers,
+        Sea::collisions(&hub)
+    ));
+
+    assert!(!openers.is_empty(), "nikt nie otworzyl rundy");
+    for (slot, result) in finals.iter().enumerate() {
+        assert_eq!(result.threshold, 4);
+        assert!(
+            result.supporters >= 4,
+            "statek {}: {} poparc",
+            ships[slot].index,
+            result.supporters
+        );
+        assert!(
+            result.endorsed,
+            "statek {} nie zatwierdzil",
+            ships[slot].index
+        );
+    }
+}
+
+#[test]
+fn two_openings_of_one_subject_are_a_split_the_fleet_survives() {
+    let _serial = one_fleet_at_a_time();
+    if !docker_available() {
+        note("POMINIETE: docker niedostepny");
+        return;
+    }
+    // The emulator keeps the two halves of the fleet from hearing each other
+    // for the first two and a half seconds, then joins them. The designated
+    // opener is in one half; the other half hears nothing, waits its rotated
+    // turn and opens its own round. From then on the fleet counts slots from
+    // two instants about nineteen slots apart -- four slots modulo the window
+    // -- so half the first binding attempts land on top of each other, and
+    // would keep doing so on every in-slot retry. The fleet must notice (two
+    // independent members disagreeing is the threshold), abandon in-slot
+    // retries, and still reach quorum. Nothing about safety changes: votes
+    // bind to the subject and the journal allows one each, whichever round
+    // they were cast in.
+    let fleet = 5;
+    let mut sea = Sea::new("split").expect("sea");
+    let hub = sea.launch_hub_with(fleet, &["--isolate-for-ms", "2500"]);
+    // Default delays: the waiting members' turns come a few seconds after the
+    // designated opener's frame, which is what the isolation window covers.
+    let ships = put_to_sea_with(&mut sea, fleet, &hub, &["--attempts", "5"]);
+
+    let finals: Vec<Final> = ships
+        .iter()
+        .map(|ship| {
+            ship.await_final(Duration::from_mins(4))
+                .unwrap_or_else(|| panic!("jednostka {} nie zameldowala sie", ship.index))
+        })
+        .collect();
+    let opened = ships
+        .iter()
+        .filter(|s| s.logs().contains("\"by\":\"self\""))
+        .map(|s| s.index.to_string())
+        .collect::<Vec<_>>();
+    let noticed = ships
+        .iter()
+        .filter(|s| s.logs().contains("\"event\":\"split\""))
+        .count();
+    let attempts: usize = finals.iter().map(|f| f.binding_attempts).sum();
+    note(&format!(
+        "  otworzyly {:?}, {noticed}/{fleet} wykrylo split, {} zderzen, {attempts} prob glosu",
+        opened,
+        Sea::collisions(&hub)
+    ));
+
+    note_anomalies(&ships);
+    assert!(
+        opened.len() >= 2,
+        "bez dwoch otwarc nie ma splitu: {opened:?}"
+    );
+    assert!(
+        noticed >= 2,
+        "split musi zostac wykryty przez wiecej niz jednego czlonka"
+    );
+    for (index, result) in finals.iter().enumerate() {
+        assert!(
+            result.supporters >= result.threshold,
+            "statek {index}: {} poparc przy progu {}",
+            result.supporters,
+            result.threshold
+        );
+        assert!(result.endorsed, "statek {index} nie zatwierdzil");
     }
 }

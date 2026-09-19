@@ -49,8 +49,18 @@ impl ScaledClock {
     /// wants the fleet to behave like an honest one.
     #[must_use]
     pub fn new(epoch: Timestamp, scale: u32, offset_s: i64) -> Self {
+        Self::anchored_at(Instant::now(), epoch, scale, offset_s)
+    }
+
+    /// A clock whose `epoch` fell at `origin`, which may be in the past.
+    ///
+    /// For a node that joins a round late and has worked out from a frame it
+    /// heard when the round actually began. Time already elapsed since that
+    /// instant is elapsed protocol time, not a fresh start.
+    #[must_use]
+    pub fn anchored_at(origin: Instant, epoch: Timestamp, scale: u32, offset_s: i64) -> Self {
         Self {
-            origin: Instant::now(),
+            origin,
             epoch,
             scale: scale.max(1),
             offset_s,

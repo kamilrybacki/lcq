@@ -15,6 +15,35 @@ extern crate alloc;
 pub const CONSULTATION_CUTOFF_SECONDS: u64 = 300;
 /// Seconds from the shared start at which endorsement is expected.
 pub const ENDORSEMENT_TARGET_SECONDS: u64 = 600;
+
+/// Seconds from the shared start before any member casts a binding vote.
+///
+/// A member closes consultation on its **own** clock, once that clock is
+/// certainly past the cutoff -- `cutoff + MAX_CLOCK_SKEW_SECONDS`. A member
+/// whose clock runs behind therefore closes later in real time than one whose
+/// clock runs ahead, and the two can differ by the whole pairwise budget. The
+/// slot schedule, by contrast, counts from a shared instant. If the binding
+/// stage opened at `cutoff + skew` on that schedule, the member furthest behind
+/// would still have consultation open when its slot came round, skip it, close
+/// late and transmit into whoever's slot was current. One more skew budget on
+/// top guarantees every honest member has closed before the first binding slot.
+pub const BINDING_STAGE_OPENS_SECONDS: u64 = CONSULTATION_CUTOFF_SECONDS
+    + 2 * crate::domain::time::MAX_CLOCK_SKEW_SECONDS
+    + PHASE_SETTLE_SECONDS;
+
+/// Seconds allowed for a member to notice its clock is past a deadline and act.
+///
+/// A separate budget from clock skew, which it must not be folded into: skew is
+/// about how far clocks disagree, this is about polling, scheduling jitter, the
+/// receive-to-transmit turnaround and preparing a frame once the deadline has
+/// certainly passed. `certainly_after` is a strict comparison, so a member
+/// exactly at the bound has not closed yet; this is what stops the first
+/// binding slot landing on that instant.
+pub const PHASE_SETTLE_SECONDS: u64 = 2;
+
+/// The binding stage must open with room to spare before endorsement is
+/// expected, or the target is unreachable by construction.
+const _: () = assert!(BINDING_STAGE_OPENS_SECONDS + 60 <= ENDORSEMENT_TARGET_SECONDS);
 /// Fallback validity when the input system supplies none.
 pub const DEFAULT_VALIDITY_SECONDS: u64 = 1_800;
 

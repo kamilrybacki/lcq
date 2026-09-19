@@ -201,6 +201,28 @@ pub fn seal_frame(
     Ok(frame)
 }
 
+/// Read a frame's cleartext header without opening it.
+///
+/// For a receiver that wants to drop a replay before paying for decryption and
+/// a signature check. The header is authenticated only by [`open_frame`], so
+/// what this returns is a *claim*: cheap to read, and never to be trusted on
+/// its own -- in particular a replay window must be advanced only after the
+/// signature inside has verified, or anyone holding the group key could poison
+/// it with forged headers.
+///
+/// # Errors
+///
+/// [`WireError::MalformedFrame`] if the bytes are too short to hold a header.
+pub fn peek_frame_header(frame: &[u8]) -> Result<(u16, u64), WireError> {
+    if frame.len() <= FRAME_HEADER_BYTES {
+        return Err(WireError::MalformedFrame);
+    }
+    let author_index = u16::from_be_bytes([frame[0], frame[1]]);
+    let mut sequence_bytes = [0u8; 8];
+    sequence_bytes.copy_from_slice(&frame[2..FRAME_HEADER_BYTES]);
+    Ok((author_index, u64::from_be_bytes(sequence_bytes)))
+}
+
 /// Open a frame taken off the air, recovering who claims to have sent it.
 ///
 /// The returned index is a *claim*: the header is authenticated, so it was not

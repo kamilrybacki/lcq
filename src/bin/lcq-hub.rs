@@ -216,6 +216,14 @@ struct Options {
     loss: f64,
     partition: bool,
     quiet: bool,
+    /// Milliseconds after the FIRST frame during which the halves cannot hear
+    /// each other. Then the channel is whole. This is how a fleet ends up with
+    /// two openings for one subject: the half that could not hear the opening
+    /// opens its own, and by the time the halves hear each other both are
+    /// counting slots from different instants. Measured from the first frame
+    /// rather than from start so it covers the opening whenever it happens.
+    isolate_ms: u64,
+    first_frame_at: std::sync::Mutex<Option<Instant>>,
 }
 
 impl Options {
@@ -237,11 +245,19 @@ impl Options {
             loss: value("--loss").and_then(|v| v.parse().ok()).unwrap_or(0.0),
             partition: args.iter().any(|a| a == "--partition"),
             quiet: args.iter().any(|a| a == "--quiet"),
+            isolate_ms: value("--isolate-for-ms")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            first_frame_at: std::sync::Mutex::new(None),
         }
     }
 
     fn reaches(&self, from: usize, to: usize) -> bool {
-        !self.partition || (from < self.fleet / 2) == (to < self.fleet / 2)
+        let same_half = (from < self.fleet / 2) == (to < self.fleet / 2);
+        let mut first = self.first_frame_at.lock().expect("lock");
+        let since_first = first.get_or_insert_with(Instant::now).elapsed();
+        let isolated = since_first < Duration::from_millis(self.isolate_ms);
+        (!self.partition && !isolated) || same_half
     }
 
     fn log(&self, line: &str) {

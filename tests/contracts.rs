@@ -133,3 +133,28 @@ fn opinions_on_different_revisions_do_not_count_together() {
     let b = Opinion::new("node-b", later, Stage::BindingSupport, Verdict::Support);
     assert!(!a.counts_with(&b));
 }
+
+#[test]
+fn the_binding_stage_opens_only_once_the_slowest_honest_clock_has_closed() {
+    // A member closes consultation on its own clock once it is certainly past
+    // the cutoff, so the one furthest behind closes a whole skew budget after
+    // the one furthest ahead. The binding stage must not open before that.
+    use lcq::domain::contracts::{
+        BINDING_STAGE_OPENS_SECONDS, CONSULTATION_CUTOFF_SECONDS, ENDORSEMENT_TARGET_SECONDS,
+        PHASE_SETTLE_SECONDS,
+    };
+    use lcq::domain::time::MAX_CLOCK_SKEW_SECONDS;
+
+    // Two skew budgets: one for the cutoff to be certainly past on the member
+    // furthest ahead, one more for the member furthest behind. Then a settle
+    // budget on top, because `certainly_after` is strict and a member exactly
+    // at the bound has not acted yet.
+    assert_eq!(
+        BINDING_STAGE_OPENS_SECONDS,
+        CONSULTATION_CUTOFF_SECONDS + 2 * MAX_CLOCK_SKEW_SECONDS + PHASE_SETTLE_SECONDS
+    );
+    let settle = std::hint::black_box(PHASE_SETTLE_SECONDS);
+    assert!(settle >= 1);
+    let opens = std::hint::black_box(BINDING_STAGE_OPENS_SECONDS);
+    assert!(opens < ENDORSEMENT_TARGET_SECONDS);
+}

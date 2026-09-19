@@ -232,6 +232,14 @@ node processes against a channel emulator, kills one and restarts it. See
 `DECISIONS.md` D7 for the four findings that only separate processes could
 produce, including the bound on how far the clock may be scaled.
 
+### Reliability hardening done (D9)
+
+Trigger admission is the full path, every frame is checked against the subject,
+timing is on the anchor with the subject's deadlines on the local clock, any
+member may open, splits are detected at a threshold of two members and answered
+with randomised retries, late joiners derive the anchor. All measured in
+containers: skew, dead opener, isolated halves, 30 % loss, twelve vessels.
+
 ### What to pick up next
 
 1. **Equivocation on the trigger** (D6) — the one open blocker. Slots must

@@ -225,7 +225,18 @@ impl Case {
 
         match (self.phase, opinion.stage()) {
             (Phase::Consulting, Stage::Independent | Stage::Consultation) => {
-                self.independent.push(opinion);
+                // One opinion per author per stage. A radio retransmits, and a
+                // replayed frame is indistinguishable from a retransmitted one,
+                // so a repeat is accepted as the same opinion rather than
+                // counted twice or refused -- refusing would make an honest
+                // repeat look like a fault in the tallies.
+                let already = self
+                    .independent
+                    .iter()
+                    .any(|o| o.author() == opinion.author() && o.stage() == opinion.stage());
+                if !already {
+                    self.independent.push(opinion);
+                }
                 Ok(())
             }
             (Phase::Consulting, Stage::BindingSupport) => Err(TransitionError::WrongStageForPhase),

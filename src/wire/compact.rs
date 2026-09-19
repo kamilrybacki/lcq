@@ -27,6 +27,17 @@ extern crate alloc;
 
 const COMPACT_DOMAIN: &[u8] = b"lcq-v1-compact";
 
+/// The widest frame this protocol puts on the air, in bytes, sealed and with
+/// its cleartext header.
+///
+/// A slot has to be wide enough for the widest frame that can ever occupy it,
+/// or a slot sized to today's frame silently overlaps its neighbour the day a
+/// field is added. This is a protocol constant, not an implementation figure:
+/// a sender whose frame exceeds it refuses to transmit rather than trusting the
+/// slot to stretch. Measured with every field at its maximum encoding and
+/// every acknowledgement bit set; see `tests/wire.rs`.
+pub const MAX_FRAME_BYTES: usize = 176;
+
 /// Which members the sender has heard, as one bit each.
 ///
 /// Rides on frames the protocol already sends, so acknowledgement costs eight
@@ -90,6 +101,78 @@ impl Heard {
     }
 }
 
+/// Which round an utterance belongs to.
+///
+/// A round is opened by one frame, and that frame is named by who sent it and
+/// under which sequence number. The journal guarantees a member never reuses a
+/// sequence, so two triggers from the same member are necessarily two different
+/// rounds -- no hashing, no truncation, and nothing an attacker can grind a
+/// collision for.
+///
+/// This exists because signatures do not stop a member saying two things. A
+/// compromised member can send different, validly signed triggers to different
+/// halves of a fleet and leave them counting slots from different instants,
+/// which makes them collide with each other indefinitely. It cannot fabricate a
+/// quorum -- votes bind to the subject and the journal allows one each -- so the
+/// damage is liveness. Carrying the round in every frame turns that from an
+/// invisible pile-up into something the first frame from the other half
+/// reveals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundId {
+    opener: u16,
+    sequence: u32,
+}
+
+impl RoundId {
+    /// The round opened by `opener` under `sequence`.
+    #[must_use]
+    pub const fn new(opener: u16, sequence: u32) -> Self {
+        Self { opener, sequence }
+    }
+
+    /// No round yet.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            opener: u16::MAX,
+            sequence: 0,
+        }
+    }
+
+    /// Whether this names a round at all.
+    #[must_use]
+    pub const fn is_set(&self) -> bool {
+        self.opener != u16::MAX
+    }
+
+    /// Who opened it.
+    #[must_use]
+    pub const fn opener(&self) -> u16 {
+        self.opener
+    }
+
+    /// The opener's sequence number for the frame that opened it.
+    #[must_use]
+    pub const fn sequence(&self) -> u32 {
+        self.sequence
+    }
+
+    /// The bytes a signature covers.
+    #[must_use]
+    pub const fn bytes(&self) -> [u8; 6] {
+        let opener = self.opener.to_be_bytes();
+        let sequence = self.sequence.to_be_bytes();
+        [
+            opener[0],
+            opener[1],
+            sequence[0],
+            sequence[1],
+            sequence[2],
+            sequence[3],
+        ]
+    }
+}
+
 /// A core utterance addressed by manifest indices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactEnvelope {
@@ -103,6 +186,7 @@ pub struct CompactEnvelope {
     verdict: u8,
     sequence: u64,
     heard: Heard,
+    round: RoundId,
 }
 
 impl CompactEnvelope {
@@ -131,6 +215,7 @@ impl CompactEnvelope {
             verdict,
             sequence,
             heard: Heard::none(),
+            round: RoundId::none(),
         }
     }
 
@@ -157,6 +242,36 @@ impl CompactEnvelope {
         self.stage
     }
 
+    /// Mission epoch the utterance was made under.
+    #[must_use]
+    pub const fn mission_epoch(&self) -> u16 {
+        self.mission_epoch
+    }
+
+    /// The event this utterance is about, as a manifest index.
+    #[must_use]
+    pub const fn event(&self) -> u32 {
+        self.event
+    }
+
+    /// Revision of the claim.
+    #[must_use]
+    pub const fn revision(&self) -> u16 {
+        self.revision
+    }
+
+    /// Hash of the claim's content.
+    #[must_use]
+    pub const fn content_hash(&self) -> &[u8; 32] {
+        &self.content_hash
+    }
+
+    /// When the claim started, in seconds since the mission epoch.
+    #[must_use]
+    pub const fn started_at(&self) -> u64 {
+        self.started_at
+    }
+
     /// The verdict carried, as its wire code.
     #[must_use]
     pub const fn verdict(&self) -> u8 {
@@ -176,6 +291,19 @@ impl CompactEnvelope {
         self.heard
     }
 
+    /// The same envelope, declaring which round it belongs to.
+    #[must_use]
+    pub const fn in_round(mut self, round: RoundId) -> Self {
+        self.round = round;
+        self
+    }
+
+    /// The round this utterance belongs to.
+    #[must_use]
+    pub const fn round(&self) -> RoundId {
+        self.round
+    }
+
     /// The bytes a signature covers, domain-separated from the readable form so
     /// a signature over one can never verify as the other.
     #[must_use]
@@ -190,6 +318,9 @@ impl CompactEnvelope {
         // onto another frame. It can still be a lie by its author, which is why
         // a receiver treats it as advisory.
         hasher.update(self.heard.bytes());
+        // Signed, so a frame cannot be moved from the round it was cast in into
+        // another one.
+        hasher.update(self.round.bytes());
         hasher.update(self.content_hash);
         hasher.update(self.started_at.to_be_bytes());
         hasher.update(self.author_index.to_be_bytes());

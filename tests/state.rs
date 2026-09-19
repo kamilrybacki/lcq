@@ -234,3 +234,27 @@ fn a_late_node_may_still_record_but_not_fabricate_a_closed_phase() {
     assert_eq!(case.independent_opinions().count(), 0);
     assert_eq!(case.phase(), Phase::CollectingVotes);
 }
+
+#[test]
+fn a_repeated_opinion_is_the_same_opinion_not_a_second_one() {
+    // A radio retransmits, and a replay is indistinguishable from a
+    // retransmission, so a repeat is accepted as the opinion already held --
+    // neither counted twice nor refused as a fault.
+    use lcq::domain::contracts::{Opinion, Stage, Subject, Verdict};
+    use lcq::domain::state::Case;
+    use lcq::domain::time::{FixedClock, Timestamp};
+
+    let s = Subject::new("m", "e", 0, [1; 32], Timestamp::from_secs(0)).expect("subject");
+    let clock = FixedClock::new(Timestamp::from_secs(10));
+    let mut case = Case::open(s.clone());
+    let opinion = Opinion::new("n1", s.clone(), Stage::Independent, Verdict::Support);
+    case.accept(opinion.clone(), &clock).expect("first");
+    case.accept(opinion, &clock)
+        .expect("repeat is not an error");
+    assert_eq!(case.independent_opinions().count(), 1);
+
+    // A different stage from the same author is a different opinion.
+    let again = Opinion::new("n1", s, Stage::Consultation, Verdict::Support);
+    case.accept(again, &clock).expect("consultation");
+    assert_eq!(case.independent_opinions().count(), 2);
+}
