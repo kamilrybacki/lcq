@@ -388,6 +388,12 @@ fn journal_writer_child() {
         if vote(&mut journal, n, u64::from(n) + 1).is_err() {
             break;
         }
+        if n == 0 {
+            // One whole record is committed and fsynced. Say so, so that the
+            // parent kills a process that has written rather than one that is
+            // still starting up.
+            let _ = fs::write(PathBuf::from(&path).with_extension("ready"), b"1");
+        }
     }
 }
 
@@ -404,9 +410,22 @@ fn a_killed_process_leaves_a_journal_that_still_opens() {
         .spawn()
         .expect("spawn the writer");
 
-    // Let it get a few fsynced records down, then kill it outright. SIGKILL is
-    // the point: no destructor runs, no buffer is flushed on the way out.
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    // Wait for the child to say it has committed a whole record, then kill it
+    // outright. SIGKILL is the point: no destructor runs and no buffer is
+    // flushed on the way out. What is *not* the point is how long a cold
+    // process takes to start, which is why this waits on the child rather
+    // than sleeping a guessed 250 ms. On a loaded two-core runner that guess
+    // was short, and the test failed for having killed a writer that had not
+    // written yet.
+    let ready = path.with_extension("ready");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the writer child never committed a record"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     child.kill().expect("kill the writer");
     let _ = child.wait();
 
