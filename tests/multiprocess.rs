@@ -27,7 +27,8 @@ use lcq::infrastructure::LogJournal;
 const HUB: &str = env!("CARGO_BIN_EXE_lcq-hub");
 const NODE: &str = env!("CARGO_BIN_EXE_lcq-node");
 const SCALE: &str = "20";
-const EPOCH: u64 = 1_000_000;
+/// The instant a run's clock counts from; not the mission epoch.
+const CLOCK_EPOCH: u64 = 1_000_000;
 
 /// One fleet on this machine at a time, across every test binary.
 ///
@@ -240,7 +241,7 @@ fn node(index: usize, fleet: usize, port: u16, journal: &Path, opens_round: bool
         .args(["--hub", &format!("127.0.0.1:{port}")])
         .args(["--journal", &journal.to_string_lossy()])
         .args(["--scale", SCALE])
-        .args(["--epoch", &EPOCH.to_string()])
+        .args(["--clock-epoch", &CLOCK_EPOCH.to_string()])
         .arg("--slots")
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -280,7 +281,7 @@ fn subject() -> Subject {
         "evt-1",
         0,
         [0x22; 32],
-        Timestamp::from_secs(EPOCH),
+        Timestamp::from_secs(CLOCK_EPOCH),
     )
     .expect("valid subject")
 }

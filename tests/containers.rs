@@ -25,7 +25,8 @@ use lcq::domain::time::Timestamp;
 use lcq::infrastructure::LogJournal;
 
 const SCALE: &str = "20";
-const EPOCH: u64 = 1_000_000;
+/// The instant a run's clock counts from; not the mission epoch.
+const CLOCK_EPOCH: u64 = 1_000_000;
 const TARGET: &str = "x86_64-unknown-linux-musl";
 
 /// One fleet on this machine at a time, across every test binary.
@@ -268,8 +269,8 @@ impl Sea {
             "/journal/vote.log".into(),
             "--scale".into(),
             SCALE.into(),
-            "--epoch".into(),
-            EPOCH.to_string(),
+            "--clock-epoch".into(),
+            CLOCK_EPOCH.to_string(),
             "--slots".into(),
         ];
         if opens_round {
@@ -600,7 +601,7 @@ fn subject() -> Subject {
         "evt-1",
         0,
         [0x22; 32],
-        Timestamp::from_secs(EPOCH),
+        Timestamp::from_secs(CLOCK_EPOCH),
     )
     .expect("valid subject")
 }

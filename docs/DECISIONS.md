@@ -1457,6 +1457,13 @@ enough of the fleet's competence" are different situations. It now also
 carries `competence` and `total_competence`, and the container and
 multiprocess harnesses read them.
 
+**Two epochs, now named apart.** The node already had a `--epoch`: the
+instant its clock counts from, nothing to do with the mission epoch a
+manifest names. Review flagged the collision as a hazard worth removing
+before provisioning builds on either, so the clock's is now `--clock-epoch`
+and the field `clock_epoch`, and the mission epoch is the only thing called
+an epoch without qualification.
+
 **It found a latent defect.** Two of the three places that build a frame --
 the vote and the trigger -- carried the mission epoch, event and revision as
 the literals `1, 1, 0` rather than the constants, which was invisible for as
@@ -1465,9 +1472,15 @@ frame as being about another subject. Epoch rotation is exactly what F5 asks
 for, so this would have failed silently the first time anyone rotated one.
 All three sites now name the fleet's epoch.
 
-**What this is not.** Nothing here is signed. The file is trusted exactly as
-far as the file system it sits on, which is the same trust the journal beside
-it already has, and less than a vessel needs. The signing keys are still
+**What this is not.** Nothing here is signed, which makes it a development
+and harness format. The first draft of this record called it the journal's
+trust level; the review was right that this is wrong. A journal is one
+member's own safety state, and losing it harms that member. A manifest is the
+fleet's root policy, and whoever can write it can change the membership, both
+quorum outcomes, the mission epoch and which index means which member --
+enough to leave two members with different views of the same fleet. That it
+cannot steal a signing key today is an accident of the harness, not a
+property. The signing keys are still
 derived from an index (`seed_for`), so the fleet this file describes and the
 keys that authenticate it are two halves that do not yet meet. Joining them
 is F4 and F5 in the threat model: a signed manifest naming each member's

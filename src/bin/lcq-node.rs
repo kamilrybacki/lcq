@@ -268,7 +268,7 @@ fn main() {
         "--fleet must be between 1 and {}",
         Heard::CAPACITY
     );
-    let epoch = Timestamp::from_secs(options.epoch);
+    let epoch = Timestamp::from_secs(options.clock_epoch);
     // Provisional, for the log lines before a round exists. The real one starts
     // when the trigger does: a case begins when the frame that opens it goes on
     // the air. Starting this clock at process start instead meant a vessel that
@@ -1892,7 +1892,10 @@ struct Options {
     manifest: Option<PathBuf>,
     scale: u32,
     offset: i64,
-    epoch: u64,
+    /// The instant this run's clock counts from, in seconds. Nothing to do
+    /// with the mission epoch a manifest names: this one only decides what
+    /// the log's timestamps are relative to.
+    clock_epoch: u64,
     slots: bool,
     guard_ms: u64,
     trigger: bool,
@@ -1921,7 +1924,7 @@ impl Options {
             manifest: value("--manifest").map(PathBuf::from),
             scale: value("--scale").and_then(|v| v.parse().ok()).unwrap_or(100),
             offset: value("--offset").and_then(|v| v.parse().ok()).unwrap_or(0),
-            epoch: value("--epoch")
+            clock_epoch: value("--clock-epoch")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1_000_000),
             slots: args.iter().any(|a| a == "--slots"),
@@ -2002,7 +2005,7 @@ impl Options {
 }
 
 fn report(options: &Options, clock: &impl Clock, line: &str) {
-    let at = clock.now().as_secs().saturating_sub(options.epoch);
+    let at = clock.now().as_secs().saturating_sub(options.clock_epoch);
     println!("{{\"t\":{at},\"node\":{},\"line\":{line}}}", options.index);
     let _ = std::io::stdout().flush();
 }

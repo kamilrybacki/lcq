@@ -88,6 +88,7 @@ defences named below are exercised rather than described.
 | **F17** | Medium | `RoundId` carries a 32-bit sequence while frames carry 64; a sequence past 2^32 would give every later round of that opener the same label (transport diagnostics, not safety). | **Guarded**: the entropy start keeps sequences below 2^31 and the node refuses to open a round whose sequence does not fit the label, rather than truncating. A wider label is a wire change for a later version. |
 | **F18** | High (A4) | Journal **rollback** -- restoring an older copy -- rewinds the sequence and reuses nonces exactly as loss does; no persisted state can detect its own restoration. | **Open — deployment**: either monotonic storage the host cannot rewind (secure element, TPM counter) or the rule that any restore of a journal is a new mission epoch with a new group key (F4). Fail closed until one exists. |
 | **F19** | Low | RNode firmware is in the trusted computing base and was only detected, never identified. | **Partial**: the firmware version is logged (`rnode_firmware`) so a fleet can pin it; a hash-based attestation is not something the host protocol offers. |
+| **F21** | **High** (deployment) | The fleet manifest (D25) is an unsigned file. Whoever can write it changes the membership, both quorum outcomes, the mission epoch and the index-to-member mapping -- enough to leave two members deliberating against different fleets. It is **not** at the journal's trust level: a journal is one member's own state, a manifest is the fleet's root policy. That it cannot steal a signing key today is an accident of keys still coming from the index. | **Open — product**, and the same work as F4. Until then the format is development and harness configuration, and is labelled as such in its own documentation. Version 2 is the answer: a canonical signed body carrying each member's public key, a manifest id, validity dates and a group-key id (never the group secret), verified against an administration key from a stronger trust root than the file, with a node that fails closed on an unknown version, an invalid or expired signature, a rollback, or a local key that does not match the one the manifest names. |
 | **F20** | Info | `RadioQueue` identifies frames by a bare sequence; two members' first frames would collide if a caller passed raw sequences. | The node passes `author << 48 \| sequence`; documented on `offer`. A typed identity is cleaner and is noted for the next wire revision. |
 
 ## 6. Evidence: the adversary tests
@@ -106,12 +107,18 @@ frame, altered header, cross-member nonce, a frame signed over another case.
 
 Both reviews land on the same order.
 
-1. **Provisioning design (F4)** — before any vessel: a signed manifest with a
-   digest, key identifiers, the mission epoch and a validity interval; each
-   member's signing key on its device and never in an image; the group key
-   per epoch from Vault/sops through Morsik; and a runtime that **fails
-   closed** when it finds fixture keys. Today's binary is an integration
-   harness, and must be called one.
+1. **Provisioning design (F4, F21)** — before any vessel: manifest version 2,
+   a canonical signed body carrying each member's public key, a manifest id,
+   the mission epoch, validity dates and a group-key id; each member's signing
+   key on its device and never in an image; the group key per epoch from
+   Vault/sops through Morsik; and a runtime that **fails closed** on an
+   unknown version, an invalid or expired signature, a rollback, a missing
+   local key, a local key that does not match the manifest, or fixture keys.
+   The signature must cover a canonical form of the body, so the whitespace,
+   comment and ordering rules have to be pinned before it is added rather than
+   after. The member's ID stays an operator label: the principal is the index
+   and the public key. Today's binary is an integration harness, and must be
+   called one.
 2. **Rollback and loss (F1, F18)** — a journal that is missing, replaced or
    older than the last one seen is a new epoch with a new group key, or the
    node does not start. Monotonic storage the host cannot rewind is the

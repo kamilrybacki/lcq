@@ -21,14 +21,26 @@
 //! any order, because a frame names its author by index and a gap would make
 //! an index mean nothing.
 //!
-//! # This is configuration, not authentication
+//! # Development configuration, not a security boundary
 //!
-//! Nothing here is signed. A manifest is trusted exactly as far as the file
-//! system it sits on -- the same trust the journal beside it already has --
-//! and a fleet at sea needs more than that: a signed manifest naming each
-//! member's public key, valid for one epoch, refusing to run on a fixture
-//! (`THREAT-MODEL.md` F4, F5). This is the shape that lifecycle will take,
-//! with the keys still to come; it is not that lifecycle.
+//! Nothing here is signed, so **this is a harness and development format**
+//! until it is. Do not mistake it for the journal's trust level: a journal is
+//! one member's own safety state, while a manifest is the whole fleet's root
+//! policy, and whoever can write this file can change the membership, both
+//! quorum outcomes, the mission epoch and which index means which member --
+//! enough to give two members a different view of the same fleet. That it
+//! cannot currently steal a signing key, because keys still come from the
+//! index, is an accident of the harness and not a property to rely on.
+//!
+//! What a vessel needs instead is `THREAT-MODEL.md` F4 and F5, and the shape
+//! it will take is a version 2 of this format: a canonical, signed body
+//! carrying each member's public key, a manifest id, validity dates and a
+//! group-key id -- never the group secret -- verified against an
+//! administration key from a stronger trust root than the file itself, with
+//! a node that fails closed on an unknown version, an invalid or expired
+//! signature, a rollback, or a local key that does not match the one the
+//! manifest names. The `version` directive exists so that arriving is a
+//! refusal on an old node rather than a misparse.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

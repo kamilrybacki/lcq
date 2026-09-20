@@ -512,6 +512,14 @@ Building it caught a latent defect: the vote and trigger frames carried
 invisible while the epoch was 1 and fatal the moment a manifest named 7. Every
 frame now carries the fleet's epoch, which is what F5's rotation will need.
 
+Review corrected one thing this record first got wrong: a manifest is **not**
+at the journal's trust level. A journal is one member's own safety state; a
+manifest is the fleet's root policy, and whoever can write it changes the
+membership, both quorum outcomes, the mission epoch and which index means
+which member. It is a development and harness format until it is signed
+(F21), and labelled as such where it is defined. The node's clock origin was
+also renamed `--clock-epoch`, so that "epoch" unqualified means the mission's.
+
 Not signed, and the keys are still `seed_for(index)`. The file is the shape
 the manifest lifecycle will take, not the lifecycle: F4 and F5 want it
 signed, carrying each member's public key, valid for one epoch, with a node

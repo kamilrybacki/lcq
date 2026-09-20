@@ -109,8 +109,12 @@ guarantee by scoring into the band that cap implies (34 to 100). Without
 `--manifest`, `--fleet N` gives synthetic members that all count the same,
 which is what the container suites use.
 
-Nothing in the file is signed. It is trusted as far as the file system it
-sits on, and a vessel needs more than that: see `docs/THREAT-MODEL.md` F4.
+Nothing in the file is signed, so it is a development and harness format
+for now. It is not at the journal's trust level: a journal is one member's
+own state, while this is the fleet's root policy, and whoever can write it
+can change the membership, both quorum outcomes and the mission epoch. A
+vessel needs the signed version 2 sketched in `docs/THREAT-MODEL.md` F4 and
+F21.
 
 ## Running a fleet
 
