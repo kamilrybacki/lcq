@@ -106,8 +106,10 @@ fn need<'a>(path: Option<&'a PathBuf>, flag: &str) -> Result<&'a Path, String> {
 /// Read the administrator's secret: 32 bytes of hexadecimal, from a file only
 /// its owner can read.
 fn read_secret(path: &Path) -> Result<SigningKey, String> {
-    let text = fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))?;
+    // The mode first: refusing after the bytes are already in this process is
+    // a refusal that has already lost.
     refuse_if_readable(path)?;
+    let text = fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))?;
     let trimmed = text.trim();
     let mut seed = [0; 32];
     if trimmed.len() != 64 {
@@ -241,7 +243,11 @@ fn verify(options: &Options) -> ExitCode {
         manifest.valid_from(),
         manifest.valid_until()
     );
-    println!("issuer {}", manifest.issuer_fingerprint());
+    // Not part of the canonical form, so anybody who can edit the file can
+    // set it to anything without breaking the signature. Printed as the hint
+    // it is, next to the fingerprint of the key that actually verified.
+    println!("verified-by {}", hand::fingerprint(&admin.to_bytes()));
+    println!("issuer-claims {} (unsigned)", manifest.issuer_fingerprint());
     println!("members {}", manifest.size());
     for member in manifest.members() {
         println!(

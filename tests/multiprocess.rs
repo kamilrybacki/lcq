@@ -194,7 +194,7 @@ impl Running {
             result.total_competence = field(line, "\"total_competence\":");
             result.endorsed = line.contains("\"endorsed\":true");
             result.recovered_vote = line.contains("\"recovered_vote\":true");
-            result.over_allowance_dropped = field(line, "\"over_allowance_dropped\":");
+            result.outside_fleet_dropped = field(line, "\"outside_fleet_dropped\":");
         }
         result
     }
@@ -309,7 +309,7 @@ struct Final {
     total_competence: usize,
     endorsed: bool,
     recovered_vote: bool,
-    over_allowance_dropped: usize,
+    outside_fleet_dropped: usize,
     reported: bool,
 }
 
@@ -399,13 +399,11 @@ fn a_fleet_described_by_a_manifest_endorses_with_the_competences_it_names() {
     let finals: Vec<Final> = nodes.iter_mut().map(Running::finish).collect();
     for (index, result) in finals.iter().enumerate() {
         assert!(result.reported, "node {index} never reported");
-        // The per-sender allowance is the duty cycle, which every honest
-        // member is already bound by (`THREAT-MODEL.md` F10). A cap that
-        // fired on a fleet flying the protocol would break one rather than
-        // defend one, so nothing here may be dropped for spending too much.
+        // Every member of this fleet is in the manifest, so nothing may be
+        // dropped as claiming an index outside it.
         assert_eq!(
-            result.over_allowance_dropped, 0,
-            "node {index} dropped honest traffic as over its allowance"
+            result.outside_fleet_dropped, 0,
+            "node {index} dropped honest traffic as coming from outside the fleet"
         );
         assert_eq!(
             result.supporters, 3,
@@ -526,6 +524,18 @@ fn a_restarted_node_recovers_its_vote_and_refuses_to_cast_a_second_one() {
     assert!(
         finals.iter().all(|f| f.reported),
         "every node should still finish"
+    );
+    // And the second life must actually reach a verdict, not merely report.
+    // The restarted node carries its own record of the highest sequence each
+    // member had reached, while the fleet around it is fresh and counting from
+    // new random starts. If that record suppressed them, this node would hear
+    // nobody and nothing above would notice.
+    assert!(
+        finals[2].supporters >= finals[2].threshold,
+        "the restarted node heard {} of the {} it needed: its record of the \
+         old fleet is shutting out the new one",
+        finals[2].supporters,
+        finals[2].threshold
     );
 }
 

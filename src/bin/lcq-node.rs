@@ -343,8 +343,6 @@ fn provision(options: &Options) -> (Fleet, Provisioned) {
 /// Read this device's signing seed: 32 bytes of hexadecimal, in a file only
 /// its owner can read.
 fn read_seed(path: &std::path::Path) -> [u8; 32] {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("signing key {}: {error}", path.display()));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -360,6 +358,10 @@ fn read_seed(path: &std::path::Path) -> [u8; 32] {
             mode & 0o777
         );
     }
+    // The mode is checked before the bytes are read: refusing afterwards is a
+    // refusal that has already lost.
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("signing key {}: {error}", path.display()));
     let trimmed = text.trim();
     assert!(
         trimmed.len() == 64,
@@ -391,50 +393,35 @@ fn remember_seen(journal: &mut LogJournal, sender: usize, sequence: u64) {
     }
 }
 
-/// Has this sender spent more airtime than the regulations allow anybody?
+/// Is this frame claiming to come from somebody who is not in the fleet?
 ///
-/// Verifying a frame costs an `ed25519` check, and a member holding the group
-/// key can put verifiable-looking frames on the air at the channel's rate:
-/// `THREAT-MODEL.md` F10. Airtime already bounded the damage; nothing made
-/// the bound a rule. The duty cycle is a limit every member on this band is
-/// bound by, so a sender past it is either broken or not one member, and this
-/// node stops paying for it either way. The budget is not charged when it
-/// refuses, so a sender that goes quiet is heard again rather than banned.
+/// The index comes from the frame header, which only `open_frame`
+/// authenticates -- this runs before that, which is the point. A claim
+/// outside the fleet can never verify, so paying for its decryption buys
+/// nothing, and refusing it here costs a bounds check.
 ///
-/// **The index this keys on is a claim.** It comes from the frame header,
-/// which `open_frame` authenticates and this does not -- the check has to run
-/// before the decryption it is trying to avoid paying for. So a liar can
-/// spend another member's allowance. What this still buys is a ceiling on the
-/// total work one radio can force a receiver to do, which is what F10 is
-/// about. Per-sender fairness needs an authenticated sender, and authenticating
-/// costs exactly the check being rationed.
-fn over_allowance(
+/// This is all that is left of a per-sender airtime allowance that was here
+/// and has been removed; `DECISIONS.md` D29 records why, and it is worth
+/// reading before anybody adds one back.
+fn from_outside_the_fleet(
     bytes: &[u8],
-    allowance: &mut [AirtimeBudget],
-    started: Instant,
+    fleet: usize,
     options: &Options,
     clock: &impl Clock,
 ) -> bool {
     let Ok((author, _)) = peek_frame_header(bytes) else {
-        // Not a frame this protocol can read. Let the ordinary path refuse it
-        // and say why; spending an allowance on it would let anybody empty a
-        // member's budget with noise.
+        // Not a frame this protocol can read. The ordinary path refuses it and
+        // says why.
         return false;
     };
-    let Some(budget) = allowance.get_mut(usize::from(author)) else {
-        return false;
-    };
-    let now_ms = u64::try_from(started.elapsed().as_millis())
-        .unwrap_or(u64::MAX)
-        .saturating_mul(u64::from(options.scale));
-    if budget.transmit(now_ms, airtime_ms(bytes.len())) {
+    if usize::from(author) < fleet {
         return false;
     }
-    bump(&METER.over_allowance_dropped);
+    bump(&METER.outside_fleet_dropped);
     report(
         options,
         clock,
-        &format!("{{\"event\":\"over_allowance\",\"claimed\":{author}}}"),
+        &format!("{{\"event\":\"outside_fleet\",\"claimed\":{author}}}"),
     );
     true
 }
@@ -468,6 +455,10 @@ fn main() {
     // the air. Starting this clock at process start instead meant a vessel that
     // waited for the fleet to assemble burned that wait as protocol time, and
     // finished the whole deliberation before anybody had spoken.
+    // A scale of zero would stop protocol time, and every sliding window here
+    // is measured in it: the airtime budget would never evict and the fleet
+    // would go silent after its first hour's worth of frames.
+    assert!(options.scale >= 1, "--scale must be at least 1");
     let mut clock = ScaledClock::new(epoch, options.scale, options.offset);
 
     let subject = Subject::new("mission", "evt-1", 0, CONTENT_HASH, epoch).expect("valid subject");
@@ -640,22 +631,18 @@ fn main() {
     // (`THREAT-MODEL.md` F2). The journal now records the highest sequence
     // admitted from each sender, so that is what seeds them.
     //
-    // Seeding from the highest alone is stricter than the bitmap it replaces
-    // and never looser: it can refuse a frame that arrives out of order
-    // across a restart, and it cannot admit one twice.
+    // `resumed` rather than `mark`: everything at or below the recorded
+    // highest counts as seen. Marking would set one bit and leave the
+    // sixty-three sequences below it readable as new, and a member's stage
+    // frames are consecutive, so that is not a corner case. The price is that
+    // a frame still in flight when the process died is refused when it lands.
     for (index, window) in windows.iter_mut().enumerate() {
         if let Ok(sender) = u16::try_from(index)
             && let Some(sequence) = journal.highest_seen(sender)
         {
-            window.mark(sequence);
+            *window = ReplayWindow::resumed(sequence);
         }
     }
-    // What one member is allowed to make this node pay for before it stops
-    // paying (`THREAT-MODEL.md` F10). The duty cycle is the one limit every
-    // member is bound by, so it is the one this node holds them to.
-    let mut allowance: Vec<AirtimeBudget> = core::iter::repeat_with(AirtimeBudget::new)
-        .take(options.fleet)
-        .collect();
     let mut attempts = [0usize; 3];
 
     let stage_window = options.stage_window_s();
@@ -758,7 +745,7 @@ fn main() {
             // listening for the frame that opens the round.
             if let Some(frame) = receive(radio.as_mut(), &options, &clock)
                 && !is_replay(&frame, &windows)
-                && !over_allowance(&frame, &mut allowance, started, &options, &clock)
+                && !from_outside_the_fleet(&frame, options.fleet, &options, &clock)
             {
                 if let Some((opened, opener, sequence)) =
                     trigger_round(&frame, &group, &keyring, &subject)
@@ -1197,7 +1184,7 @@ fn main() {
                 report(&options, &clock, "{\"event\":\"replay_dropped\"}");
                 continue;
             }
-            if over_allowance(&frame, &mut allowance, started, &options, &clock) {
+            if from_outside_the_fleet(&frame, options.fleet, &options, &clock) {
                 continue;
             }
             if let Some((other, opener, sequence)) =
@@ -1414,7 +1401,7 @@ fn main() {
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"competence\":{},\"total_competence\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"header_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"over_allowance_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
+            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"competence\":{},\"total_competence\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"header_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"outside_fleet_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
             options.index,
             supporters.len(),
             policy.min_signers(),
@@ -1427,7 +1414,7 @@ fn main() {
             METER.header_errors.load(Ordering::Relaxed),
             METER.chip_missed.load(Ordering::Relaxed),
             METER.replays_dropped.load(Ordering::Relaxed),
-            METER.over_allowance_dropped.load(Ordering::Relaxed),
+            METER.outside_fleet_dropped.load(Ordering::Relaxed),
             budget.used_ms(
                 u64::try_from(started.elapsed().as_millis())
                     .unwrap_or(u64::MAX)
@@ -1692,7 +1679,7 @@ struct Meter {
     header_errors: AtomicU64,
     chip_missed: AtomicU64,
     replays_dropped: AtomicU64,
-    over_allowance_dropped: AtomicU64,
+    outside_fleet_dropped: AtomicU64,
 }
 
 static METER: Meter = Meter {
@@ -1701,7 +1688,7 @@ static METER: Meter = Meter {
     header_errors: AtomicU64::new(0),
     chip_missed: AtomicU64::new(0),
     replays_dropped: AtomicU64::new(0),
-    over_allowance_dropped: AtomicU64::new(0),
+    outside_fleet_dropped: AtomicU64::new(0),
 };
 
 fn bump(counter: &AtomicU64) {

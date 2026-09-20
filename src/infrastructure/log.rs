@@ -353,11 +353,17 @@ impl LogJournal {
 
         let mut written = 0u64;
         {
-            let mut fresh = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&temporary)?;
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            // The replacement is renamed over the journal, so it carries its
+            // own permissions with it. Created without this, compaction would
+            // quietly widen a 0600 journal to whatever the umask allows.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut fresh = options.open(&temporary)?;
             for entry in &entries {
                 let record = encode(entry)?;
                 fresh.write_all(&record)?;
@@ -375,22 +381,36 @@ impl LogJournal {
     }
 
     /// Append one record and flush it, reporting durability rather than I/O.
+    /// Write one record and make it durable.
+    ///
+    /// This does **not** compact. Compaction rewrites the file from the live
+    /// state, and every caller here updates that state *after* `append`
+    /// returns, so compacting from inside this function would rebuild the file
+    /// from a state that does not yet include the record just written -- and
+    /// erase it. The caller calls [`LogJournal::compact_if_large`] once its
+    /// own state is settled.
     fn append(&mut self, entry: &Entry) -> Result<(), JournalError> {
         match self.try_append(entry) {
-            Ok(()) => {
-                if self.bytes_on_disk > COMPACT_THRESHOLD_BYTES {
-                    // A failed compaction is not a failed append: the record is
-                    // already durable in the original log.
-                    if let Err(OpenError::Io(error)) = self.compact() {
-                        self.last_io_error = Some(error);
-                    }
-                }
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(error) => {
                 self.last_io_error = Some(error);
                 Err(JournalError::NotDurable)
             }
+        }
+    }
+
+    /// Rewrite the log from the live state if it has grown past the threshold.
+    ///
+    /// Called at the end of every mutator, never from inside [`append`]: the
+    /// live state has to already hold everything on disk, or compaction drops
+    /// whatever the caller had not applied yet. A failed compaction is not a
+    /// failed write -- the records are already durable in the original log.
+    fn compact_if_large(&mut self) {
+        if self.bytes_on_disk <= COMPACT_THRESHOLD_BYTES {
+            return;
+        }
+        if let Err(OpenError::Io(error)) = self.compact() {
+            self.last_io_error = Some(error);
         }
     }
 
@@ -431,6 +451,7 @@ impl Journal for LogJournal {
             .next_sequence
             .max(frame.sequence().saturating_add(1));
         self.state.pending.insert(frame.sequence(), frame);
+        self.compact_if_large();
         Ok(())
     }
 
@@ -446,6 +467,7 @@ impl Journal for LogJournal {
         // nonce out twice.
         self.append(&Entry::Sequence { next })?;
         self.state.next_sequence = next;
+        self.compact_if_large();
         Ok(reserved)
     }
 
@@ -468,6 +490,7 @@ impl Journal for LogJournal {
             return false;
         }
         self.state.pending.remove(&sequence);
+        self.compact_if_large();
         true
     }
 
@@ -487,6 +510,7 @@ impl Journal for LogJournal {
             // the next sweep. Dropping it in memory only would resurrect it at
             // the next restart.
         }
+        self.compact_if_large();
     }
 
     fn witness(&mut self, author: &str, frame: &[u8]) -> Result<(), JournalError> {
@@ -500,6 +524,7 @@ impl Journal for LogJournal {
         self.state
             .witnessed
             .insert(String::from(author), frame.to_vec());
+        self.compact_if_large();
         Ok(())
     }
 
@@ -526,6 +551,7 @@ impl Journal for LogJournal {
         // reopened from this file agree about who has been heard.
         self.state.seen.clear();
         self.state.epoch = Some(epoch);
+        self.compact_if_large();
         Ok(())
     }
 
@@ -544,6 +570,7 @@ impl Journal for LogJournal {
         }
         self.append(&Entry::Seen { sender, sequence })?;
         self.state.seen.insert(sender, sequence);
+        self.compact_if_large();
         Ok(())
     }
 

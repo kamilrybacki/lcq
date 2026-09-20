@@ -559,24 +559,6 @@ fn a_fleet_larger_than_a_frame_can_acknowledge_is_refused() {
 }
 
 #[test]
-fn a_manifest_that_parses_but_cannot_be_a_policy_is_refused_at_the_door() {
-    // 100 against 20 is past the 3:1 cap, so this is not a lawful fleet even
-    // though every line of it reads.
-    let text = body(&format!(
-        "member 0 100 {a} ship-alpha
-member 1 20 {b} ship-bravo
-",
-        a = key_hex(1),
-        b = key_hex(2),
-    ));
-    let signed = Manifest::sign_text(&text, &admin()).expect("signing does not judge a policy");
-    assert!(matches!(
-        Manifest::parse(&signed),
-        Err(ManifestError::Policy(_))
-    ));
-}
-
-#[test]
 fn signing_an_already_signed_manifest_replaces_the_signature() {
     let once = signed(&three());
     let twice = Manifest::sign_text(&once, &admin()).expect("re-signing an edited manifest");
@@ -688,4 +670,37 @@ fn a_second_signature_line_is_not_a_second_chance() {
         }),
         "a manifest with two signatures is not a manifest"
     );
+}
+
+#[test]
+fn signing_refuses_what_parsing_would_refuse() {
+    // A tool that signs a manifest no node will load hands an operator a file
+    // that bricks a fleet and reports success. Both paths run the same checks.
+    let unlawful = body(&format!(
+        "member 0 100 {a} ship-alpha
+member 1 20 {b} ship-bravo
+",
+        a = key_hex(1),
+        b = key_hex(2),
+    ));
+    assert!(
+        matches!(
+            Manifest::sign_text(&unlawful, &admin()),
+            Err(ManifestError::Policy(_))
+        ),
+        "a spread past the ratio cap must be refused before it is signed"
+    );
+
+    // And the refusals the structure makes are the same on both paths, so a
+    // signed file is always one this build can read back.
+    for broken in [
+        three().replace("heard-capacity 64", "heard-capacity 32"),
+        three().replace("epoch 7", "epoch 07"),
+        three().replace(&key_hex(2), &key_hex(1)),
+    ] {
+        assert!(
+            Manifest::sign_text(&broken, &admin()).is_err(),
+            "signing accepted what parsing refuses"
+        );
+    }
 }

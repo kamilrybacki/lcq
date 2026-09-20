@@ -1742,3 +1742,90 @@ would be defeated by any restore that takes the directory -- which is what a
 restore is. Building one would have moved the row's status without moving its
 security. F18 stays open against deployment, and closing it needs storage the
 host cannot rewind.
+
+## D29 — What an adversarial review found that the tests could not
+
+Hermes and the Codex CLI share one provider quota and it was spent, so this
+review ran as a reader with no context from the session that wrote the code --
+deliberately, so that nothing would be taken on trust because the author had
+already said it. It found a critical defect, two false claims in D28, and a
+mitigation that was worse than what it mitigated.
+
+**The critical one: compaction erased the write that triggered it.** Every
+mutator on the log wrote its record and *then* updated the live state.
+Compaction rebuilds the file from that live state, and it fired from inside
+`append`, before the caller had settled. So the record that pushed the file
+past 256 KiB was durable for about a microsecond and was then rewritten away
+by the compaction it caused. The caller got `Ok(())`.
+
+Four things that breaks, in order of how much they matter:
+
+- `reserve_sequence`: the on-disk nonce counter rewinds. A sequence handed out
+  and sealed under is handed out again after a restart. That is keystream
+  reuse and Poly1305-key exposure under the group key -- F1, live, with no
+  attacker and no lost journal.
+- `commit_vote`: the lock and its frame go, while the frame is already on the
+  air. After a restart the member votes a second time, which is the first
+  invariant the journal exists to hold.
+- `enter_epoch`: the rotation is forgotten. A node runs under epoch 9, and its
+  journal claims 8, so the spent epoch-8 manifest is accepted again -- under
+  the epoch-8 group key, with a counter already spent under it. D27's
+  anti-rollback rule defeated by an ordinary rotation on a busy vessel, no
+  restore required.
+- `mark_seen`: the replay window reopens on that sender, which is F2 again.
+
+The fix is to take compaction out of `append` and give it its own call at the
+end of each mutator, once the state it rebuilds from is complete.
+
+**Why every test missed it, which is the part worth keeping.** Both
+compaction tests called `compact()` by hand, after the caller's state had
+already settled. That is the one path a running node never takes. No test grew
+a journal past the threshold, so the automatic path -- the only real one --
+had never run under test at all. A test that drives a function directly is not
+a test of the path that calls it.
+
+**D28 claimed the replay seeding "cannot admit a replay". It could.** Seeding
+a window with `mark(highest)` sets one bit, so the sixty-three sequences below
+the highest read as new after a restart -- and a member's three stage frames
+are consecutive sequences, so that is the common case rather than a corner.
+`ReplayWindow::resumed` now treats everything at or below the recorded highest
+as seen. The price is the one D28 already described and this now actually
+pays: a frame still in flight when the process died is refused when it lands.
+
+**The per-sender airtime allowance is removed.** It was the F10 mitigation the
+threat model itself recommended, and the review showed the recommendation is
+unsafe as written. The budget was charged on the claimed sender index, read
+from the frame header before any decryption -- which is the point, since the
+decryption is what it rations. So anybody could spend anybody's allowance
+without holding a single key: twenty-seven frames, about thirty-six seconds of
+airtime, carrying a victim's index, and that member is dropped *before
+decryption* at every receiver for an hour. Selective, persistent, repeatable
+per victim, and strictly cheaper for an attacker than jamming, which costs
+continuous transmission and cannot be aimed.
+
+F10 is rated Low and the threat model already says why: airtime bounds it, at
+one signature check per 1.2 seconds, about a millisecond on a Raspberry Pi.
+Trading that for a targeted silencing primitive is a bad trade, so F10 goes
+back to bounded-and-accepted and the reason the recommended mitigation was
+built and then removed is written down, because it will look obvious again.
+
+**What survives from it** is the half with no downside: a frame claiming an
+index outside the fleet is dropped before decryption. Such a claim can never
+verify, so paying to decrypt it buys nothing, and no honest member has an
+index outside the fleet, so nothing can be silenced this way. The review found
+that gap too -- an out-of-range claim was passing both the replay check and
+the allowance, so the one frame shape that could never be legitimate was the
+one shape that was never rationed.
+
+**Four smaller things.** `sign_text` did not run the policy check that
+`parse` runs, so an administrator could sign a manifest no node would load and
+be told it worked. `lcq-manifest verify` printed the unsigned `issuer` line
+among fields that are signed; it now prints the fingerprint of the key that
+actually verified, and labels the claim as unsigned. `--scale 0` froze
+protocol time, and with it every sliding window. And both key readers loaded a
+secret into memory before checking that nobody else could read the file, which
+is a refusal that has already lost.
+
+**Compaction also widened the journal from 0600 to whatever the umask allowed**,
+because the replacement file was created without a mode and renamed over the
+original. Older than these commits; found by the same read.

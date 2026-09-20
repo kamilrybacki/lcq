@@ -30,6 +30,26 @@ impl ReplayWindow {
         }
     }
 
+    /// Resume from the highest sequence a journal recorded for this sender.
+    ///
+    /// Everything at or below `highest` counts as seen, which is the whole
+    /// difference from [`ReplayWindow::mark`]. `mark` sets one bit, so after a
+    /// restart the sixty-three sequences below the highest would read as new
+    /// and each could be admitted once more -- and a member's three stage
+    /// frames are consecutive sequences, so that is not a corner case.
+    ///
+    /// The price is the mirror of it: a frame that was genuinely still in
+    /// flight when the process died is refused when it lands. That is a
+    /// liveness cost in a window that only opens on a restart, and it is the
+    /// right side to err on.
+    #[must_use]
+    pub const fn resumed(highest: u64) -> Self {
+        Self {
+            highest: Some(highest),
+            seen: u64::MAX,
+        }
+    }
+
     /// The newest sequence seen from this sender.
     #[must_use]
     pub const fn highest(&self) -> Option<u64> {

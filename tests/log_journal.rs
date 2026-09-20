@@ -704,3 +704,151 @@ fn compaction_does_not_forget_who_had_been_heard() {
     assert_eq!(reopened.highest_seen(1), Some(77));
     assert_eq!(reopened.epoch(), Some(2));
 }
+
+/* ------------------------------------------------------------------ *
+ * Compaction fires on its own, from inside a write. What it must not  *
+ * do is forget the write that fired it.                               *
+ * ------------------------------------------------------------------ */
+
+/// The size at which the journal rewrites itself.
+const COMPACTION_AT: u64 = 256 * 1024;
+
+/// Grow the log to just under the size that makes it compact itself.
+///
+/// It cannot simply wait for the file to pass the threshold: compaction fires
+/// the moment it does and takes the file back down, so a loop waiting to
+/// observe a large file waits forever. It stops a few thousand bytes short
+/// instead, and the caller's own writes are what cross the line.
+///
+/// Every earlier compaction test called `compact()` by hand, after the
+/// caller's state had already settled. That is the one path a running node
+/// never takes.
+fn grow_to_the_edge_of_compaction(journal: &mut LogJournal) {
+    const MARGIN: u64 = 4096;
+    for _ in 0..200_000u32 {
+        if journal.bytes_on_disk() + MARGIN >= COMPACTION_AT {
+            assert!(
+                journal.bytes_on_disk() <= COMPACTION_AT,
+                "the growth loop crossed the line itself"
+            );
+            return;
+        }
+        journal
+            .reserve_sequence()
+            .expect("sequences keep being handed out");
+    }
+    panic!("the journal never grew");
+}
+
+#[test]
+fn the_write_that_triggers_compaction_survives_it() {
+    let scratch = Scratch::new("compaction-trigger");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    grow_to_the_edge_of_compaction(&mut journal);
+
+    // These writes straddle the moment compaction fires. Whichever one
+    // triggers it must still be on disk afterwards: compaction rebuilds the
+    // file from the live state, and a caller that updates its state after the
+    // write would otherwise have the record erased under it.
+    for _ in 0..400 {
+        let reserved = journal.reserve_sequence().expect("handed out");
+        let live = journal.next_sequence();
+        assert_eq!(live, reserved + 1);
+        assert_eq!(
+            open(&path).next_sequence(),
+            live,
+            "a sequence handed out was not durable: a restart would hand it \
+             out again and reuse the nonce it was sealed under"
+        );
+    }
+}
+
+#[test]
+fn a_vote_that_triggers_compaction_keeps_its_lock_and_its_frame() {
+    let scratch = Scratch::new("compaction-vote");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    grow_to_the_edge_of_compaction(&mut journal);
+
+    for n in 0..400u32 {
+        let sequence = journal.next_sequence();
+        vote(&mut journal, n, sequence).expect("the vote commits");
+        let reopened = open(&path);
+        assert!(
+            reopened.has_voted(&subject(n), "self"),
+            "vote {n} returned Ok and its lock is not on disk: a restart \
+             would let this member vote a second time"
+        );
+        assert!(
+            reopened.pending().any(|frame| frame.sequence() == sequence),
+            "vote {n} kept its lock and lost its frame"
+        );
+    }
+}
+
+#[test]
+fn an_epoch_rotation_that_triggers_compaction_is_not_forgotten() {
+    let scratch = Scratch::new("compaction-epoch");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    journal.enter_epoch(8).expect("epoch recorded");
+    journal.mark_seen(1, 5009).expect("recorded");
+    grow_to_the_edge_of_compaction(&mut journal);
+    // Right up to the line, so the rotation itself is what crosses it.
+    while journal.bytes_on_disk() + 64 < COMPACTION_AT {
+        journal.reserve_sequence().expect("handed out");
+    }
+
+    // The rotation an administrator performs on a busy vessel.
+    journal.enter_epoch(9).expect("rotation");
+    let reopened = open(&path);
+    assert_eq!(
+        reopened.epoch(),
+        Some(9),
+        "the journal forgot the epoch it rotated into, so the spent epoch 8 \
+         would be accepted again under the key it was already used with"
+    );
+    assert_eq!(
+        reopened.highest_seen(1),
+        None,
+        "the rotation cleared what had been heard live and not on disk"
+    );
+}
+
+#[test]
+fn what_a_sender_reached_survives_the_compaction_it_triggers() {
+    let scratch = Scratch::new("compaction-seen");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    grow_to_the_edge_of_compaction(&mut journal);
+
+    for sequence in 1..400u64 {
+        journal.mark_seen(9, sequence * 10).expect("recorded");
+        assert_eq!(
+            open(&path).highest_seen(9),
+            Some(sequence * 10),
+            "the replay window reopened on sender 9"
+        );
+    }
+}
+
+#[test]
+fn compaction_does_not_widen_a_journal_anybody_else_can_read() {
+    let scratch = Scratch::new("compaction-mode");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    grow_to_the_edge_of_compaction(&mut journal);
+    journal.compact().expect("compaction succeeds");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "compaction renamed a fresh file over the journal and took its \
+             permissions with it"
+        );
+    }
+}

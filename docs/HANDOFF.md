@@ -689,3 +689,44 @@ authenticated fact, and the documentation says so.
 journal would look like a defence and is defeated by any restore that takes
 the directory. The epoch rule from D27 is the remedy; F18 stays open against
 deployment until there is storage the host cannot rewind.
+
+## D29 — an outside read, and what it cost
+
+Hermes and the Codex CLI share one provider quota and it was spent, so this
+review ran as a reader with no context from the session that wrote the code.
+That was the point: nothing taken on trust because the author had already
+said it.
+
+It found a **critical** defect. Compaction fired from inside the journal's
+`append`, and compaction rebuilds the file from the live state -- which every
+caller updates *after* `append` returns. So the record that pushed the file
+past 256 KiB was erased by the compaction it triggered, and the caller was
+told it succeeded. That rewinds the on-disk nonce counter (F1, live, no
+attacker), loses a vote lock whose frame is already on the air, forgets an
+epoch rotation (defeating D27's anti-rollback rule with no restore involved),
+and reopens a replay window. Compaction now has its own call at the end of
+each mutator.
+
+Why no test caught it: both compaction tests called `compact()` by hand, after
+the caller's state had settled. No test grew a journal past the threshold, so
+the automatic path -- the only one a running node takes -- had never run under
+test. There are now five that do, and three of them fail if the fix is undone.
+
+It also found that D28's claim "it cannot admit a replay" was **false**:
+seeding a window with `mark(highest)` sets one bit, leaving the sixty-three
+sequences below it readable as new, and a member's stage frames are
+consecutive. `ReplayWindow::resumed` fixes it.
+
+And the per-sender airtime allowance from D28 is **removed**. Charged on an
+unauthenticated claimed index before decryption, it let anyone holding no key
+spend about 36 s of airtime to silence a chosen member at every receiver for
+an hour -- cheaper than jamming and aimable, where jamming is not. F10 is Low
+and already bounded by airtime, so the mitigation was worse than the disease.
+What survives is the half with no downside: a frame claiming an index outside
+the fleet is dropped before decryption.
+
+Smaller: `sign_text` now runs the policy check `parse` runs; `lcq-manifest
+verify` prints the fingerprint of the key that actually verified and labels
+the unsigned `issuer` claim; `--scale 0` is refused; both key readers check
+the file mode before reading the secret; and compaction no longer widens a
+0600 journal to the umask.

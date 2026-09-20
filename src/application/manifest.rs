@@ -956,8 +956,19 @@ impl Parts {
 
     /// The bytes an administrator signs, for a file that does not carry a
     /// signature yet.
+    ///
+    /// Held to exactly what [`Parts::finish`] holds a parsed manifest to,
+    /// including the policy. Signing something no node will load is a way to
+    /// hand an operator a file that bricks a fleet and report success.
     fn canonical(mut self) -> Result<Vec<u8>, ManifestError> {
         self.settle()?;
+        Policy::with_settings(
+            self.members
+                .iter()
+                .map(|member| (member.id.clone(), member.competence)),
+            self.byzantine_bps.unwrap_or_default(),
+            self.max_competence_ratio.unwrap_or_default(),
+        )?;
         Ok(canonical(
             self.epoch.unwrap_or_default(),
             self.valid_from.unwrap_or_default(),

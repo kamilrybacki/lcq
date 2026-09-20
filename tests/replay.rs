@@ -87,3 +87,39 @@ fn sequence_zero_is_a_sequence_like_any_other() {
     assert!(window.seen(0));
     assert!(window.seen(1));
 }
+
+#[test]
+fn a_window_resumed_from_a_journal_refuses_everything_it_covers() {
+    // A restart reads back one number: the highest sequence this sender
+    // reached. Marking that number would set one bit and leave the sixty-three
+    // below it looking new, and a member's stage frames are consecutive
+    // sequences -- so a restart would reopen the window on exactly the frames
+    // most likely to be replayed.
+    let resumed = ReplayWindow::resumed(100);
+    assert_eq!(resumed.highest(), Some(100));
+    for sequence in 37..=100u64 {
+        assert!(
+            resumed.seen(sequence),
+            "sequence {sequence} read as new after a restart"
+        );
+    }
+    assert!(resumed.seen(0), "and anything older still reads as seen");
+    assert!(!resumed.seen(101), "while the future is still open");
+
+    // What `mark` does instead, which is what this replaces.
+    let mut marked = ReplayWindow::new();
+    marked.mark(100);
+    assert!(
+        !marked.seen(99),
+        "this is the hole the resumed window closes"
+    );
+}
+
+#[test]
+fn a_resumed_window_still_advances() {
+    let mut window = ReplayWindow::resumed(100);
+    assert!(!window.seen(101));
+    window.mark(101);
+    assert!(window.seen(101));
+    assert!(window.seen(100), "and does not forget what it resumed with");
+}
