@@ -639,13 +639,14 @@ fn how_a_file_was_written_cannot_change_what_it_says() {
             "tabs for spaces",
             plain.replace("member 0 100", "member\t0\t100"),
         ),
-        (
-            "a comment on every line",
-            plain
-                .lines()
-                .map(|line| format!("{line} # written by hand\n"))
-                .collect(),
-        ),
+        ("a comment on every line", {
+            let mut commented = String::new();
+            for line in plain.lines() {
+                writeln!(commented, "{line} # written by hand")
+                    .expect("a string never fails to grow");
+            }
+            commented
+        }),
     ] {
         let other = Manifest::parse(&rewritten)
             .unwrap_or_else(|error| panic!("{what} stopped it parsing: {error}"));
