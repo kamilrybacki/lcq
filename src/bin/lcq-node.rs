@@ -374,6 +374,71 @@ fn read_seed(path: &std::path::Path) -> [u8; 32] {
     seed
 }
 
+/// Tell the journal a sender has reached `sequence`, so a restart does not
+/// reopen the replay window on it (`THREAT-MODEL.md` F2).
+///
+/// A write that fails here is worth a line and not a stop: the replay window
+/// in memory is already correct, and the cost of losing this one is that one
+/// frame from this sender could be replayed once after a restart, at the price
+/// of a signature check. Refusing to run over that would trade a real fleet
+/// for a theoretical millisecond.
+fn remember_seen(journal: &mut LogJournal, sender: usize, sequence: u64) {
+    let Ok(sender) = u16::try_from(sender) else {
+        return;
+    };
+    if let Err(error) = journal.mark_seen(sender, sequence) {
+        eprintln!("{{\"event\":\"seen_not_durable\",\"sender\":{sender},\"why\":\"{error}\"}}");
+    }
+}
+
+/// Has this sender spent more airtime than the regulations allow anybody?
+///
+/// Verifying a frame costs an `ed25519` check, and a member holding the group
+/// key can put verifiable-looking frames on the air at the channel's rate:
+/// `THREAT-MODEL.md` F10. Airtime already bounded the damage; nothing made
+/// the bound a rule. The duty cycle is a limit every member on this band is
+/// bound by, so a sender past it is either broken or not one member, and this
+/// node stops paying for it either way. The budget is not charged when it
+/// refuses, so a sender that goes quiet is heard again rather than banned.
+///
+/// **The index this keys on is a claim.** It comes from the frame header,
+/// which `open_frame` authenticates and this does not -- the check has to run
+/// before the decryption it is trying to avoid paying for. So a liar can
+/// spend another member's allowance. What this still buys is a ceiling on the
+/// total work one radio can force a receiver to do, which is what F10 is
+/// about. Per-sender fairness needs an authenticated sender, and authenticating
+/// costs exactly the check being rationed.
+fn over_allowance(
+    bytes: &[u8],
+    allowance: &mut [AirtimeBudget],
+    started: Instant,
+    options: &Options,
+    clock: &impl Clock,
+) -> bool {
+    let Ok((author, _)) = peek_frame_header(bytes) else {
+        // Not a frame this protocol can read. Let the ordinary path refuse it
+        // and say why; spending an allowance on it would let anybody empty a
+        // member's budget with noise.
+        return false;
+    };
+    let Some(budget) = allowance.get_mut(usize::from(author)) else {
+        return false;
+    };
+    let now_ms = u64::try_from(started.elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::from(options.scale));
+    if budget.transmit(now_ms, airtime_ms(bytes.len())) {
+        return false;
+    }
+    bump(&METER.over_allowance_dropped);
+    report(
+        options,
+        clock,
+        &format!("{{\"event\":\"over_allowance\",\"claimed\":{author}}}"),
+    );
+    true
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     let mut options = Options::from_args();
@@ -567,23 +632,30 @@ fn main() {
     // after the signature verifies: the cleartext header is a claim, and anyone
     // holding the group key could otherwise poison the window with forgeries.
     let mut windows: Vec<ReplayWindow> = vec![ReplayWindow::new(); options.fleet];
-    // A restart must not reopen the replay window: everything the journal
-    // holds -- votes witnessed, our own frames -- was seen, and is seen still.
-    for (author, bytes) in journal.witnessed() {
-        if let Some(index) = member_index(author)
-            && let Ok((_, sequence)) = peek_frame_header(bytes)
-            && let Some(window) = windows.get_mut(index)
+    // A restart must not reopen the replay window. This used to be rebuilt
+    // from whatever the journal happened to hold -- votes witnessed, our own
+    // queued frames -- which forgot every frame that was seen and neither:
+    // a trigger, a request, a frame refused after verifying. Each of those
+    // could be replayed once per restart at the cost of a signature check
+    // (`THREAT-MODEL.md` F2). The journal now records the highest sequence
+    // admitted from each sender, so that is what seeds them.
+    //
+    // Seeding from the highest alone is stricter than the bitmap it replaces
+    // and never looser: it can refuse a frame that arrives out of order
+    // across a restart, and it cannot admit one twice.
+    for (index, window) in windows.iter_mut().enumerate() {
+        if let Ok(sender) = u16::try_from(index)
+            && let Some(sequence) = journal.highest_seen(sender)
         {
             window.mark(sequence);
         }
     }
-    for frame in journal.pending() {
-        if let Ok((_, sequence)) = peek_frame_header(frame.bytes())
-            && let Some(window) = windows.get_mut(options.index)
-        {
-            window.mark(sequence);
-        }
-    }
+    // What one member is allowed to make this node pay for before it stops
+    // paying (`THREAT-MODEL.md` F10). The duty cycle is the one limit every
+    // member is bound by, so it is the one this node holds them to.
+    let mut allowance: Vec<AirtimeBudget> = core::iter::repeat_with(AirtimeBudget::new)
+        .take(options.fleet)
+        .collect();
     let mut attempts = [0usize; 3];
 
     let stage_window = options.stage_window_s();
@@ -686,11 +758,13 @@ fn main() {
             // listening for the frame that opens the round.
             if let Some(frame) = receive(radio.as_mut(), &options, &clock)
                 && !is_replay(&frame, &windows)
+                && !over_allowance(&frame, &mut allowance, started, &options, &clock)
             {
                 if let Some((opened, opener, sequence)) =
                     trigger_round(&frame, &group, &keyring, &subject)
                 {
                     windows[opener].mark(sequence);
+                    remember_seen(&mut journal, opener, sequence);
                     round = opened;
                     began = Some(Instant::now());
                     clock = ScaledClock::new(epoch, options.scale, options.offset);
@@ -708,6 +782,7 @@ fn main() {
                     // say exactly when the round began. Waiting for a trigger
                     // that has already gone would mean never joining.
                     windows[late.author].mark(late.sequence);
+                    remember_seen(&mut journal, late.author, late.sequence);
                     round = late.round;
                     began = Some(late.origin);
                     clock =
@@ -965,6 +1040,7 @@ fn main() {
                     // only after paying for a signature verification.
                     if let Ok((_, sequence)) = peek_frame_header(&bytes) {
                         windows[options.index].mark(sequence);
+                        remember_seen(&mut journal, options.index, sequence);
                     }
                     // The next attempt returns to this member's own slot in the
                     // next window -- unless a split is known, in which case the
@@ -1121,10 +1197,14 @@ fn main() {
                 report(&options, &clock, "{\"event\":\"replay_dropped\"}");
                 continue;
             }
+            if over_allowance(&frame, &mut allowance, started, &options, &clock) {
+                continue;
+            }
             if let Some((other, opener, sequence)) =
                 trigger_round(&frame, &group, &keyring, &subject)
             {
                 windows[opener].mark(sequence);
+                remember_seen(&mut journal, opener, sequence);
                 if other != round {
                     // A second, validly signed opening for the same subject.
                     // Signatures do not stop a member saying two things; what
@@ -1155,6 +1235,7 @@ fn main() {
             }
             if let Some((from, sequence)) = learned.verified {
                 windows[from].mark(sequence);
+                remember_seen(&mut journal, from, sequence);
                 if learned.refused == Some(TransitionError::WrongStageForPhase)
                     && learned.stage_index == Some(2)
                 {
@@ -1333,7 +1414,7 @@ fn main() {
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"competence\":{},\"total_competence\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"header_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
+            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"competence\":{},\"total_competence\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"header_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"over_allowance_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
             options.index,
             supporters.len(),
             policy.min_signers(),
@@ -1346,6 +1427,7 @@ fn main() {
             METER.header_errors.load(Ordering::Relaxed),
             METER.chip_missed.load(Ordering::Relaxed),
             METER.replays_dropped.load(Ordering::Relaxed),
+            METER.over_allowance_dropped.load(Ordering::Relaxed),
             budget.used_ms(
                 u64::try_from(started.elapsed().as_millis())
                     .unwrap_or(u64::MAX)
@@ -1610,6 +1692,7 @@ struct Meter {
     header_errors: AtomicU64,
     chip_missed: AtomicU64,
     replays_dropped: AtomicU64,
+    over_allowance_dropped: AtomicU64,
 }
 
 static METER: Meter = Meter {
@@ -1618,6 +1701,7 @@ static METER: Meter = Meter {
     header_errors: AtomicU64::new(0),
     chip_missed: AtomicU64::new(0),
     replays_dropped: AtomicU64::new(0),
+    over_allowance_dropped: AtomicU64::new(0),
 };
 
 fn bump(counter: &AtomicU64) {

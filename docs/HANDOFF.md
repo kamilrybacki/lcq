@@ -656,3 +656,36 @@ node refuse to read a secret key file anybody else can read.
 Still missing, and named as such: the group key as a real secret, each
 member's signing key generated on its own device, and the rotation path when a
 member is excluded (F5).
+
+## D28 — F2 and F10, in their lightest honest form
+
+The operator asked for the lightest solution that works, which changed both
+designs before either was written.
+
+**F2.** One durable fact instead of a persisted bitmap: the highest sequence
+admitted from each sender, written only when it moves, and a restart seeds its
+replay windows from that. The old seeding rebuilt them from `witnessed()` and
+`pending()`, which forget every frame that was seen and neither -- a trigger, a
+request, a frame refused after verifying -- so each could be replayed once per
+restart. Seeding from the highest is stricter than the bitmap and never
+looser; the price is that a frame arriving out of order across a restart is
+refused, which is liveness and not safety. A new epoch clears the record,
+because an index under a new manifest is not the same member. That clearing
+lives in the log's replay rule, so a reopened journal agrees with the live one
+-- the first version cleared only the live map and a test caught it.
+
+**F10.** One `AirtimeBudget` per sender, beside the windows, charged at the two
+places that already hold a raw frame before any decryption. No new module, no
+new port. The cap is the duty cycle, because it is the one limit every member
+is already bound by: a receiver allows exactly what an honest sender was
+permitted to send, and a test runs both sides over the same traffic and asserts
+they agree frame for frame. Writing that test found the first draft wrong --
+thirty-two frames an hour looks modest and is already past the budget. Over the
+allowance, a frame is dropped before decryption and the signature check,
+metered as `over_allowance_dropped`. The index is a claim, not an
+authenticated fact, and the documentation says so.
+
+**F18 gets no code, and that is the finding.** A watermark file beside the
+journal would look like a defence and is defeated by any restore that takes
+the directory. The epoch rule from D27 is the remedy; F18 stays open against
+deployment until there is storage the host cannot rewind.

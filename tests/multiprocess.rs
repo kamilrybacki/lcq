@@ -194,6 +194,7 @@ impl Running {
             result.total_competence = field(line, "\"total_competence\":");
             result.endorsed = line.contains("\"endorsed\":true");
             result.recovered_vote = line.contains("\"recovered_vote\":true");
+            result.over_allowance_dropped = field(line, "\"over_allowance_dropped\":");
         }
         result
     }
@@ -308,6 +309,7 @@ struct Final {
     total_competence: usize,
     endorsed: bool,
     recovered_vote: bool,
+    over_allowance_dropped: usize,
     reported: bool,
 }
 
@@ -397,6 +399,14 @@ fn a_fleet_described_by_a_manifest_endorses_with_the_competences_it_names() {
     let finals: Vec<Final> = nodes.iter_mut().map(Running::finish).collect();
     for (index, result) in finals.iter().enumerate() {
         assert!(result.reported, "node {index} never reported");
+        // The per-sender allowance is the duty cycle, which every honest
+        // member is already bound by (`THREAT-MODEL.md` F10). A cap that
+        // fired on a fleet flying the protocol would break one rather than
+        // defend one, so nothing here may be dropped for spending too much.
+        assert_eq!(
+            result.over_allowance_dropped, 0,
+            "node {index} dropped honest traffic as over its allowance"
+        );
         assert_eq!(
             result.supporters, 3,
             "node {index} counted {} supporters",

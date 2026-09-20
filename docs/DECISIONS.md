@@ -1673,3 +1673,72 @@ so in its own first lines: it shows the shape, and anybody can forge it.
 each member's signing key generated on its own device, and the rotation path
 when a member is excluded (F5). Those are provisioning and governance, not
 protocol, and the format has the fields they will fill.
+
+## D28 — The lightest thing that actually closes F2 and F10
+
+The operator asked for the lightest solution that works, and that changed
+both of these designs before either was written. Recording what was dropped
+matters as much as what was kept, because the heavier versions will look
+obvious again to somebody reading this later.
+
+**F2, what was dropped.** Serialising `ReplayWindow` itself, a scope record
+carrying the manifest digest, persisting the 64-bit bitmap, three new port
+methods and the compaction handling for all of it.
+
+**F2, what was kept.** One durable fact: the highest sequence admitted from
+each sender, written only when it moves. A restart seeds its windows from
+that instead of rebuilding them from whatever the journal happened to hold.
+The old seeding read `witnessed()` and `pending()`, which between them forget
+every frame that was seen and neither -- a trigger, a request, a frame refused
+after it verified -- and each of those could be replayed once per restart at
+the price of a signature check.
+
+Seeding from the highest alone is **stricter** than the bitmap it replaces and
+never looser: it cannot admit a replay, and what it gives up is tolerance for
+a frame that arrives out of order across a restart. That is a liveness cost in
+a rare window, and it is the whole price of not persisting sixty-four bits per
+sender on every frame.
+
+Scope came free. A new epoch clears the record, because an index under a new
+manifest need not be the member that index named under the old one. The
+clearing lives in the log's replay rule rather than at the call site, so a
+journal reopened from the file reaches the same conclusion as the one that
+wrote it -- the first version cleared only the live map, and a test caught the
+two disagreeing.
+
+**F10, what was dropped.** A new module in `application`, a new port, and
+journal-backed evidence of abuse.
+
+**F10, what was kept.** One `AirtimeBudget` per sender, beside the replay
+windows, charged at the two places that already hold a raw frame before any
+decryption. No new type: the budget already exists, is already tested, and
+already encodes the rule worth holding a sender to.
+
+**Why the duty cycle is the right cap.** It is the one limit every member on
+this band is bound by, so a receiver that allows exactly it accepts everything
+an honest member was permitted to transmit and refuses the first frame that
+member's own budget would have refused. A test runs both sides over the same
+traffic and asserts they agree frame for frame. Inventing a number instead --
+some multiple of the honest rate -- would have been a number nobody could
+defend. Writing that test found the first draft of it wrong: thirty-two frames
+an hour reads like a modest pattern and is already past the regulatory budget,
+which is exactly why a receiver should not be guessing at what honest looks
+like.
+
+The budget is not charged when it refuses, so a sender that goes quiet is
+heard again rather than banned. A member whose radio misbehaved has to be able
+to come back.
+
+**Said plainly: the index is a claim.** The check reads the sender from the
+frame header, which only `open_frame` authenticates, and it has to run before
+the decryption it is rationing. A liar can spend another member's allowance.
+What this buys is a ceiling on the total work one radio can force a receiver
+to do, which is what F10 is about; per-sender fairness needs an authenticated
+sender, and authenticating costs exactly the check being rationed.
+
+**And F18 gets no code, which is the finding.** The remedy is the epoch rule
+from D27. A watermark file beside the journal would look like a defence and
+would be defeated by any restore that takes the directory -- which is what a
+restore is. Building one would have moved the row's status without moving its
+security. F18 stays open against deployment, and closing it needs storage the
+host cannot rewind.

@@ -620,3 +620,87 @@ fn the_snapshot_carries_the_epoch_to_a_restored_journal() {
         Some(4)
     );
 }
+
+/* ------------------------------------------------------------------ *
+ * The highest sequence admitted from each sender (F2).                *
+ * ------------------------------------------------------------------ */
+
+#[test]
+fn a_fresh_journal_has_seen_nobody() {
+    let scratch = Scratch::new("seen-fresh");
+    assert_eq!(open(&scratch.file("journal.log")).highest_seen(0), None);
+}
+
+#[test]
+fn what_a_sender_reached_survives_the_process_that_heard_it() {
+    let scratch = Scratch::new("seen-restart");
+    let path = scratch.file("journal.log");
+    {
+        let mut journal = open(&path);
+        journal.mark_seen(0, 41).expect("recorded");
+        journal.mark_seen(2, 900).expect("recorded");
+        assert_eq!(journal.highest_seen(0), Some(41));
+    }
+    let journal = open(&path);
+    assert_eq!(journal.highest_seen(0), Some(41));
+    assert_eq!(journal.highest_seen(2), Some(900));
+    assert_eq!(journal.highest_seen(1), None, "nobody heard from index 1");
+}
+
+#[test]
+fn a_sender_never_goes_backwards() {
+    let scratch = Scratch::new("seen-monotonic");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    journal.mark_seen(0, 100).expect("recorded");
+    // An out-of-order frame is not a rewind, and it costs no write.
+    let before = journal.bytes_on_disk();
+    journal.mark_seen(0, 7).expect("accepted and ignored");
+    assert_eq!(journal.highest_seen(0), Some(100));
+    assert_eq!(
+        journal.bytes_on_disk(),
+        before,
+        "a record that would not move anything must not be written"
+    );
+    journal.mark_seen(0, 101).expect("recorded");
+    drop(journal);
+    assert_eq!(open(&path).highest_seen(0), Some(101));
+}
+
+#[test]
+fn a_new_epoch_forgets_who_had_been_heard() {
+    let scratch = Scratch::new("seen-epoch");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    journal.enter_epoch(3).expect("epoch recorded");
+    journal.mark_seen(0, 500).expect("recorded");
+    assert_eq!(journal.highest_seen(0), Some(500));
+
+    // Index 0 under a new manifest need not be the member index 0 was under
+    // the old one, so what it had reached says nothing about the new one.
+    journal.enter_epoch(4).expect("rotation");
+    assert_eq!(journal.highest_seen(0), None);
+    drop(journal);
+    assert_eq!(
+        open(&path).highest_seen(0),
+        None,
+        "and a replay of the log must reach the same conclusion"
+    );
+}
+
+#[test]
+fn compaction_does_not_forget_who_had_been_heard() {
+    let scratch = Scratch::new("seen-compaction");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    journal.enter_epoch(2).expect("epoch recorded");
+    journal.mark_seen(1, 77).expect("recorded");
+    for n in 0..8u32 {
+        vote(&mut journal, n, u64::from(n) + 1).expect("votes commit");
+    }
+    journal.compact().expect("compaction succeeds");
+    assert_eq!(journal.highest_seen(1), Some(77));
+    let reopened = open(&path);
+    assert_eq!(reopened.highest_seen(1), Some(77));
+    assert_eq!(reopened.epoch(), Some(2));
+}

@@ -99,6 +99,8 @@ impl OutgoingFrame {
 pub struct JournalSnapshot {
     /// The highest mission epoch this journal has ever run under, if any.
     pub epoch: Option<u16>,
+    /// The highest sequence admitted from each sender, by index.
+    pub seen: Vec<(u16, u64)>,
     /// `(mission, event, revision, content hash, voter)` for every held lock.
     pub vote_locks: Vec<(alloc::string::String, u64)>,
     /// Frames not yet acknowledged.
@@ -200,6 +202,25 @@ pub trait Journal {
     ///
     /// [`JournalError::NotDurable`] if it could not be written.
     fn enter_epoch(&mut self, epoch: u16) -> Result<(), JournalError>;
+
+    /// The highest sequence this journal has admitted from `sender`.
+    ///
+    /// A restart seeds its replay windows from these rather than rebuilding
+    /// them from whatever happened to be journaled, so a frame that was seen
+    /// but neither witnessed nor queued -- a trigger, a request -- cannot be
+    /// replayed once per restart (`THREAT-MODEL.md` F2).
+    fn highest_seen(&self, sender: u16) -> Option<u64>;
+
+    /// Record that `sender` has reached `sequence`.
+    ///
+    /// Monotonic per sender, and a no-op when it would not move: this is
+    /// written on the receive path, so it must cost nothing when a frame
+    /// arrives out of order.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::NotDurable`] if it could not be written.
+    fn mark_seen(&mut self, sender: u16, sequence: u64) -> Result<(), JournalError>;
 
     /// Everything a restart has to agree with.
     fn snapshot(&self) -> JournalSnapshot;

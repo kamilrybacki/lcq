@@ -20,6 +20,7 @@ extern crate alloc;
 #[derive(Debug, Clone, Default)]
 pub struct MemoryJournal {
     epoch: Option<u16>,
+    seen: BTreeMap<u16, u64>,
     locks: BTreeSet<String>,
     pending: BTreeMap<u64, OutgoingFrame>,
     next_sequence: u64,
@@ -32,6 +33,7 @@ impl MemoryJournal {
     pub fn restored(snapshot: JournalSnapshot) -> Self {
         Self {
             epoch: snapshot.epoch,
+            seen: snapshot.seen.into_iter().collect(),
             locks: snapshot.vote_locks.into_iter().map(|(k, _)| k).collect(),
             pending: snapshot
                 .pending
@@ -111,13 +113,29 @@ impl Journal for MemoryJournal {
         if self.epoch.is_some_and(|held| held >= epoch) {
             return Ok(());
         }
+        self.seen.clear();
         self.epoch = Some(epoch);
+        Ok(())
+    }
+
+    fn highest_seen(&self, sender: u16) -> Option<u64> {
+        self.seen.get(&sender).copied()
+    }
+
+    fn mark_seen(&mut self, sender: u16, sequence: u64) -> Result<(), JournalError> {
+        let held = self.seen.entry(sender).or_default();
+        *held = (*held).max(sequence);
         Ok(())
     }
 
     fn snapshot(&self) -> JournalSnapshot {
         JournalSnapshot {
             epoch: self.epoch,
+            seen: self
+                .seen
+                .iter()
+                .map(|(sender, sequence)| (*sender, *sequence))
+                .collect(),
             vote_locks: self.locks.iter().map(|k| (k.clone(), 0)).collect(),
             pending: self.pending.values().cloned().collect(),
             next_sequence: self.next_sequence,

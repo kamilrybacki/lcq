@@ -70,6 +70,8 @@ enum Entry {
     },
     /// The highest sequence number handed out so far, plus one.
     Sequence { next: u64 },
+    /// The highest sequence admitted from one sender.
+    Seen { sender: u16, sequence: u64 },
     /// The mission epoch this journal is running under.
     ///
     /// Monotonic on replay, like the sequence: a record claiming an older
@@ -125,6 +127,7 @@ impl From<io::Error> for OpenError {
 #[derive(Debug, Default)]
 struct State {
     epoch: Option<u16>,
+    seen: BTreeMap<u16, u64>,
     locks: BTreeSet<String>,
     pending: BTreeMap<u64, OutgoingFrame>,
     next_sequence: u64,
@@ -155,7 +158,18 @@ impl State {
             // arrive in, so a replayed log can never rewind it.
             Entry::Sequence { next } => self.next_sequence = self.next_sequence.max(next),
             Entry::Epoch { epoch } => {
+                // A later epoch is a different world: the same index can mean
+                // a different member under a new manifest, so what was seen
+                // under the old one says nothing. Clearing here rather than at
+                // the call site means a replay of the log reproduces it.
+                if self.epoch.is_none_or(|held| epoch > held) {
+                    self.seen.clear();
+                }
                 self.epoch = Some(self.epoch.map_or(epoch, |held| held.max(epoch)));
+            }
+            Entry::Seen { sender, sequence } => {
+                let held = self.seen.entry(sender).or_default();
+                *held = (*held).max(sequence);
             }
             Entry::Retired { sequence } => {
                 self.pending.remove(&sequence);
@@ -312,6 +326,13 @@ impl LogJournal {
         // had never run, which is exactly what a rollback wants to look like.
         if let Some(epoch) = self.state.epoch {
             entries.push(Entry::Epoch { epoch });
+        }
+        // After the epoch, so that the clearing rule above does not undo them.
+        for (sender, sequence) in &self.state.seen {
+            entries.push(Entry::Seen {
+                sender: *sender,
+                sequence: *sequence,
+            });
         }
         for key in &self.state.locks {
             entries.push(Entry::Lock { key: key.clone() });
@@ -501,13 +522,40 @@ impl Journal for LogJournal {
             return Ok(());
         }
         self.append(&Entry::Epoch { epoch })?;
+        // The same clearing the replay path does, so the live journal and one
+        // reopened from this file agree about who has been heard.
+        self.state.seen.clear();
         self.state.epoch = Some(epoch);
+        Ok(())
+    }
+
+    fn highest_seen(&self, sender: u16) -> Option<u64> {
+        self.state.seen.get(&sender).copied()
+    }
+
+    fn mark_seen(&mut self, sender: u16, sequence: u64) -> Result<(), JournalError> {
+        if self
+            .state
+            .seen
+            .get(&sender)
+            .is_some_and(|held| *held >= sequence)
+        {
+            return Ok(());
+        }
+        self.append(&Entry::Seen { sender, sequence })?;
+        self.state.seen.insert(sender, sequence);
         Ok(())
     }
 
     fn snapshot(&self) -> JournalSnapshot {
         JournalSnapshot {
             epoch: self.state.epoch,
+            seen: self
+                .state
+                .seen
+                .iter()
+                .map(|(sender, sequence)| (*sender, *sequence))
+                .collect(),
             vote_locks: self.state.locks.iter().map(|k| (k.clone(), 0)).collect(),
             pending: self.state.pending.values().cloned().collect(),
             next_sequence: self.state.next_sequence,
