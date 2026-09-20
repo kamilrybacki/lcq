@@ -1,0 +1,20 @@
+# A fleet of three, for the first day on hardware.
+#
+# Competence is what the manifest says a member's judgment is worth, on a
+# scale of 1 to 100 (D24). Whoever assembles the fleet decides what it
+# measures and normalises onto the scale: the square root of a language
+# model's parameter count adjusted for quantisation, a benchmark score, an
+# instrument's calibration record, or the agreement history of a
+# deterministic calculation. The protocol never learns which.
+#
+# The ratio cap is 3:1, so scoring every member into 34..100 keeps any
+# manifest lawful however the members are scored one by one.
+
+version 1
+epoch 1
+
+# These three come from the worked example in HANDOFF.md: parameter counts
+# of 8 B, 3 B and 0.5 B, square-rooted and mapped onto 34..100.
+member 0 100 ship-alpha
+member 1 66 ship-bravo
+member 2 34 ship-charlie

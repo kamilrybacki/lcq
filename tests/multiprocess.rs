@@ -187,6 +187,8 @@ impl Running {
             result.reported = true;
             result.supporters = field(line, "\"supporters\":");
             result.threshold = field(line, "\"threshold\":");
+            result.competence = field(line, "\"competence\":");
+            result.total_competence = field(line, "\"total_competence\":");
             result.endorsed = line.contains("\"endorsed\":true");
             result.recovered_vote = line.contains("\"recovered_vote\":true");
         }
@@ -254,6 +256,8 @@ fn node(index: usize, fleet: usize, port: u16, journal: &Path, opens_round: bool
 struct Final {
     supporters: usize,
     threshold: usize,
+    competence: usize,
+    total_competence: usize,
     endorsed: bool,
     recovered_vote: bool,
     reported: bool,
@@ -305,6 +309,77 @@ fn a_fleet_of_real_processes_all_reach_the_same_verdict() {
     // the quorum depends on who you ask, which is the failure the whole design
     // exists to prevent.
     assert!(finals.windows(2).all(|w| w[0].endorsed == w[1].endorsed));
+}
+
+#[test]
+fn a_fleet_described_by_a_manifest_endorses_with_the_competences_it_names() {
+    let _serial = one_fleet_at_a_time();
+    let scratch = Scratch::new("manifest-fleet");
+    // Three members that decide by different means: the manifest is the only
+    // thing that says what each one's judgment is worth (D24, D25). The
+    // spread is the widest the 3:1 cap allows.
+    let manifest = scratch.0.join("fleet.manifest");
+    std::fs::write(
+        &manifest,
+        "version 1\nepoch 7\nmember 0 99 ship-alpha\nmember 1 66 ship-bravo\nmember 2 33 ship-charlie\n",
+    )
+    .expect("manifest written");
+
+    let hub = Hub::start(3);
+    let mut nodes: Vec<Running> = Vec::new();
+    for index in (1..3).rev() {
+        let mut command = node(
+            index,
+            3,
+            hub.port,
+            &scratch.0.join(format!("n{index}.journal")),
+            false,
+        );
+        command.args(["--manifest", &manifest.to_string_lossy()]);
+        let running = Running::start(command);
+        assert!(
+            running.await_line("\"start\"", Duration::from_secs(30)),
+            "node {index} never started"
+        );
+        nodes.push(running);
+    }
+    let mut opener = node(0, 3, hub.port, &scratch.0.join("n0.journal"), true);
+    opener.args(["--manifest", &manifest.to_string_lossy()]);
+    nodes.insert(0, Running::start(opener));
+
+    let finals: Vec<Final> = nodes.iter_mut().map(Running::finish).collect();
+    for (index, result) in finals.iter().enumerate() {
+        assert!(result.reported, "node {index} never reported");
+        assert_eq!(
+            result.supporters, 3,
+            "node {index} counted {} supporters",
+            result.supporters
+        );
+        assert!(
+            result.endorsed,
+            "node {index} did not endorse a fleet that all voted"
+        );
+    }
+
+    // The competences the file named are what the report counts: 99, 66 and
+    // 33 from every one of the three members.
+    for (index, result) in finals.iter().enumerate() {
+        assert_eq!(
+            (result.competence, result.total_competence),
+            (198, 198),
+            "node {index} reported the wrong competence"
+        );
+    }
+
+    // The manifest named the members, so the journals hold its names and not
+    // the harness's synthetic ones.
+    let journal = LogJournal::open(scratch.0.join("n1.journal")).expect("journal opens");
+    let locks = journal.snapshot().vote_locks;
+    assert!(
+        locks.iter().any(|(key, _)| key.contains("ship-bravo")),
+        "the vote lock should name the member the manifest named, got {:?}",
+        locks.iter().map(|(key, _)| key).collect::<Vec<_>>()
+    );
 }
 
 #[test]

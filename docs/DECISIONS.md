@@ -1408,3 +1408,70 @@ supported; the band is the recommendation.
 Kept deliberately: the cap does not stop one member at the top of the scale
 from blocking the threshold (F12). That remains a property of the design, now
 stated in the scale's own terms.
+
+## D25 — A fleet is a file, not a count on the command line
+
+**Decided and implemented 2026-09-20.** D24 gave a member's standing a scale
+and a name, and then left it with no way in: the node built its fleet from
+`--fleet N`, gave every member a synthetic `n0`, `n1` identity and the same
+competence, and took the mission epoch from a constant. A fleet whose members
+decide by different means cannot say so through an integer.
+
+So a manifest is a file, and every member reads the same one:
+
+```text
+# Three vessels; the second and third defer to the first.
+version 1
+epoch 7
+member 0 99 ship-alpha
+member 1 66 ship-bravo
+member 2 33 ship-charlie
+```
+
+`lcq-node --manifest <path>` takes the fleet's size, its members' names,
+their competences and the mission epoch from it; `--fleet N` remains for the
+harness and the container suites, where there is no service to normalise
+anything and every member counts the same.
+
+**Why a line format and not JSON or TOML.** The crate has no parser for
+either, and a manifest is the one file an operator may have to fix on a
+vessel with a serial console and no documentation. Three directives, one per
+line, `#` for comments, and every complaint names its line number. Adding a
+dependency to read six lines would have been the larger decision.
+
+**Indices must cover `0..n` exactly once.** A frame names its author by index
+to save bytes on the air (D3), so a gap would leave an index that decodes to
+nobody, and a duplicate would leave one that decodes to two. The parser
+refuses both, and refuses a fleet larger than the acknowledgement bitmap can
+name -- the check the node used to make about `--fleet`, now made where the
+fleet is defined.
+
+**A manifest that cannot be a policy is not a manifest.** Parsing ends by
+building the `Policy`, so a competence off the scale or a spread past the
+ratio cap is refused at the door rather than at the first vote.
+
+**Both thresholds are now reported.** The `final` line carried
+`supporters` and the count threshold and said nothing about competence,
+which made half the verdict invisible: "four of five voted" and "but not
+enough of the fleet's competence" are different situations. It now also
+carries `competence` and `total_competence`, and the container and
+multiprocess harnesses read them.
+
+**It found a latent defect.** Two of the three places that build a frame --
+the vote and the trigger -- carried the mission epoch, event and revision as
+the literals `1, 1, 0` rather than the constants, which was invisible for as
+long as the constant was 1. The first fleet with an epoch of 7 refused every
+frame as being about another subject. Epoch rotation is exactly what F5 asks
+for, so this would have failed silently the first time anyone rotated one.
+All three sites now name the fleet's epoch.
+
+**What this is not.** Nothing here is signed. The file is trusted exactly as
+far as the file system it sits on, which is the same trust the journal beside
+it already has, and less than a vessel needs. The signing keys are still
+derived from an index (`seed_for`), so the fleet this file describes and the
+keys that authenticate it are two halves that do not yet meet. Joining them
+is F4 and F5 in the threat model: a signed manifest naming each member's
+public key, valid for one epoch, a node that refuses to run on a fixture. The
+format has room for the key column that will carry it, and the version
+directive exists so that adding one is a refusal on an old node rather than a
+misparse.

@@ -25,8 +25,10 @@ use lcq::application::{
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lcq::application::Manifest;
 use lcq::domain::contracts::{
     BINDING_STAGE_OPENS_SECONDS, ENDORSEMENT_TARGET_SECONDS, Opinion, Stage, Subject, Verdict,
 };
@@ -79,8 +81,80 @@ const NACK_STAGE: u8 = 4;
 /// Three rounds put that below three per cent, for at most six more windows.
 const REPAIR_ROUNDS: u64 = 3;
 
-/// The subject's manifest identity, as every frame carries it.
+/// The mission epoch a fleet runs under when no manifest names one.
 const MISSION_EPOCH: u16 = 1;
+
+/// Who is in this fleet, what each member's judgment is worth, and which
+/// mission epoch its frames carry (D24, D25).
+///
+/// Set once before anything reads it, and never again: a fleet is the one
+/// thing in a running node that cannot change, because a member joining
+/// mid-round would move a denominator every other member is still counting
+/// against.
+struct Fleet {
+    mission_epoch: u16,
+    ids: Vec<String>,
+    policy: Policy,
+}
+
+impl Fleet {
+    /// The fleet a bare `--fleet N` describes: synthetic names, every member
+    /// counting the same. What a harness has when no service wrote a manifest.
+    fn uniform(size: usize) -> Self {
+        let ids: Vec<String> = (0..size).map(|index| format!("n{index}")).collect();
+        let policy = Policy::new(ids.iter().map(|id| (id.clone(), Competence::FULL.value())))
+            .expect("equal competences are always within the cap");
+        Self {
+            mission_epoch: MISSION_EPOCH,
+            ids,
+            policy,
+        }
+    }
+
+    /// The fleet a manifest file describes.
+    fn from_manifest(manifest: &Manifest) -> Self {
+        Self {
+            mission_epoch: manifest.epoch(),
+            ids: manifest
+                .members()
+                .iter()
+                .map(|member| member.id().to_string())
+                .collect(),
+            policy: manifest
+                .policy()
+                .expect("a parsed manifest is already a lawful policy"),
+        }
+    }
+
+    fn size(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn id(&self, index: usize) -> &str {
+        self.ids.get(index).map_or("?", String::as_str)
+    }
+
+    fn index_of(&self, id: &str) -> Option<usize> {
+        self.ids.iter().position(|held| held == id)
+    }
+
+    const fn policy(&self) -> &Policy {
+        &self.policy
+    }
+
+    const fn mission_epoch(&self) -> u16 {
+        self.mission_epoch
+    }
+}
+
+/// The fleet this process runs in, set once in `main`.
+static FLEET: OnceLock<Fleet> = OnceLock::new();
+
+fn fleet() -> &'static Fleet {
+    FLEET
+        .get()
+        .expect("the fleet is set before anything reads it")
+}
 const EVENT: u32 = 1;
 const REVISION: u16 = 0;
 
@@ -91,7 +165,7 @@ const REVISION: u16 = 0;
 /// because the receiver builds the opinion from its own subject. The state
 /// machine's own subject check can only catch what the receiver hands it.
 fn same_subject(envelope: &CompactEnvelope, subject: &Subject) -> bool {
-    envelope.mission_epoch() == MISSION_EPOCH
+    envelope.mission_epoch() == fleet().mission_epoch()
         && envelope.event() == EVENT
         && envelope.revision() == REVISION
         && envelope.case() == &case_reference(subject.content_hash())
@@ -164,7 +238,28 @@ fn entropy_below(bound: u64) -> u64 {
 // thing a reader needs.
 #[allow(clippy::too_many_lines)]
 fn main() {
-    let options = Options::from_args();
+    let mut options = Options::from_args();
+    // A manifest says who the fleet is; `--fleet` only says how many. When
+    // both are given the manifest wins, because it is the one that names
+    // members and what their judgment is worth (D25).
+    let assembled = match &options.manifest {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("manifest {}: {error}", path.display()));
+            let manifest = Manifest::parse(&text)
+                .unwrap_or_else(|error| panic!("manifest {}: {error}", path.display()));
+            Fleet::from_manifest(&manifest)
+        }
+        None => Fleet::uniform(options.fleet),
+    };
+    options.fleet = assembled.size();
+    assert!(
+        options.index < assembled.size(),
+        "--index {} is not a member of a fleet of {}",
+        options.index,
+        assembled.size()
+    );
+    let _ = FLEET.set(assembled);
     // The acknowledgement bitmap has one bit per member and no more; a fleet
     // past it would lose acknowledgements silently, which is worse than not
     // starting.
@@ -187,10 +282,7 @@ fn main() {
         .collect();
     let manifest: Vec<VerifyingKey> = keys.iter().map(SigningKey::verifying_key).collect();
     let group = GroupKey::from_bytes(GROUP_KEY);
-    // The harness has no service to normalise anything, so every member
-    // counts fully and the ratio cap is trivially satisfied.
-    let policy = Policy::new((0..options.fleet).map(|i| (member_id(i), Competence::FULL.value())))
-        .expect("policy");
+    let policy = fleet().policy().clone();
 
     // Recovering the journal IS the restart path. Anything already committed is
     // read back here, including a vote lock that must not be taken twice.
@@ -1072,15 +1164,22 @@ fn main() {
     }
 
     let supporters: Vec<String> = case.binding_supporters().map(ToString::to_string).collect();
-    let approved = evaluate(&policy, supporters.clone()).is_ok_and(|o| o.approved());
+    // Both thresholds, not just the count: "four of five voted" and "but not
+    // enough of the fleet's competence" are different situations and an
+    // operator reading one line deserves to tell them apart (D24).
+    let outcome = evaluate(&policy, supporters.clone()).ok();
+    let approved = outcome.is_some_and(|o| o.approved());
+    let support_competence = outcome.map_or(0, |o| o.support_competence());
     report(
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"header_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
+            "{{\"event\":\"final\",\"index\":{},\"supporters\":{},\"threshold\":{},\"competence\":{},\"total_competence\":{},\"endorsed\":{},\"recovered_vote\":{recovered_vote},\"binding_attempts\":{},\"acknowledged\":{acknowledged},\"verifications\":{},\"crc_errors\":{},\"header_errors\":{},\"chip_missed\":{},\"replays_dropped\":{},\"airtime_ms\":{},\"evidence\":{},\"splits\":{}}}",
             options.index,
             supporters.len(),
             policy.min_signers(),
+            support_competence,
+            policy.total_competence(),
             approved,
             attempts[2],
             METER.verifications.load(Ordering::Relaxed),
@@ -1151,9 +1250,9 @@ fn build(
         .map_err(|error| error.to_string())?;
     let author = u16::try_from(options.index).unwrap_or(u16::MAX);
     let envelope = CompactEnvelope::new(
-        1,
-        1,
-        0,
+        fleet().mission_epoch(),
+        EVENT,
+        REVISION,
         *subject.content_hash(),
         subject.started_at().as_secs(),
         author,
@@ -1203,7 +1302,7 @@ fn build_nack(
         .map_err(|error| error.to_string())?;
     let author = u16::try_from(options.index).unwrap_or(u16::MAX);
     let envelope = CompactEnvelope::new(
-        MISSION_EPOCH,
+        fleet().mission_epoch(),
         EVENT,
         REVISION,
         *subject.content_hash(),
@@ -1234,9 +1333,9 @@ fn build_trigger(
         .map_err(|error| error.to_string())?;
     let author = u16::try_from(options.index).unwrap_or(u16::MAX);
     let envelope = CompactEnvelope::new(
-        1,
-        1,
-        0,
+        fleet().mission_epoch(),
+        EVENT,
+        REVISION,
         *subject.content_hash(),
         subject.started_at().as_secs(),
         author,
@@ -1789,6 +1888,8 @@ struct Options {
     fleet: usize,
     hub: String,
     journal: PathBuf,
+    /// A fleet manifest to read the members from, instead of `--fleet`.
+    manifest: Option<PathBuf>,
     scale: u32,
     offset: i64,
     epoch: u64,
@@ -1817,6 +1918,7 @@ impl Options {
             fleet: value("--fleet").and_then(|v| v.parse().ok()).unwrap_or(5),
             hub: value("--hub").unwrap_or_else(|| "127.0.0.1:9000".to_string()),
             journal: value("--journal").map_or_else(|| PathBuf::from("node.log"), PathBuf::from),
+            manifest: value("--manifest").map(PathBuf::from),
             scale: value("--scale").and_then(|v| v.parse().ok()).unwrap_or(100),
             offset: value("--offset").and_then(|v| v.parse().ok()).unwrap_or(0),
             epoch: value("--epoch")
@@ -1950,13 +2052,13 @@ fn forward_key(author: usize, sequence: u64) -> u64 {
     (u64::try_from(author).unwrap_or(0) << 48) | (sequence & 0x0000_FFFF_FFFF_FFFF)
 }
 
-/// The index a member id names, if it is one this node issues.
+/// The index the fleet names this member by, if it names it at all.
 fn member_index(id: &str) -> Option<usize> {
-    id.strip_prefix('n')?.parse().ok()
+    fleet().index_of(id)
 }
 
 fn member_id(index: usize) -> String {
-    format!("n{index}")
+    fleet().id(index).to_string()
 }
 
 fn seed_for(index: usize) -> [u8; 32] {

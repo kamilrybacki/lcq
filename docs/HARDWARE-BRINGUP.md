@@ -184,10 +184,27 @@ not a single number: the tail is what a slot budget has to survive.
 ./target/release/lcq-node --index 0 --fleet 3 --slots --journal ship0.log --radio bridge:/dev/ttyACM2 --trigger
 ```
 
+The three nodes above all count the same because `--fleet 3` says so. To
+give them different standing, hand every one the same manifest instead
+(D25); `docs/three-vessels.manifest` is ready to copy:
+
+```sh
+./target/release/lcq-node --index 0 --manifest fleet.manifest --slots \
+  --journal ship0.log --radio bridge:/dev/ttyACM2 --trigger
+```
+
+The fleet's size, its members' names and its mission epoch then come from the
+file, and the logs name the vessels rather than `n0`. Worth doing on day one
+even with equal competences, because it is the path a real fleet takes and it
+exercises the epoch the manifest names.
+
 With a fleet of three the threshold is three: every vote is needed, and a
 single lost frame goes to repair. Expect: the trigger, each member's vote in
 its slot, acknowledgements, and a `final` line on every node with
-`supporters` `3`, `threshold` `3`, `endorsed` `true`, `verifications` around
+`supporters` `3`, `threshold` `3`, `competence` equal to `total_competence`
+(both thresholds are reported, because "everyone voted" and "not enough of
+the fleet's competence" are different answers), `endorsed` `true`,
+`verifications` around
 a dozen, `crc_errors` `0`, `chip_missed` `0`, `splits` `0`. Compare the
 meters with a
 `LCQ_RADIO=sx1262` container run of the same fleet size; the virtual chip's

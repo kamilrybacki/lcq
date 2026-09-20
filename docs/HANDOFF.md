@@ -457,6 +457,67 @@ can score into so that its manifest satisfies the ratio cap by construction
 (34..100 at a cap of 3); scoring outside it is allowed and `Policy::new`
 rejects an illegal spread loudly.
 
+### Normalising a fleet onto the scale
+
+The protocol takes a competence and asks no questions (D24), so the recipe
+lives with whoever assembles the manifest. The one that is written down here
+is Morsik's, worked through, because a rule without an example gets applied
+three different ways.
+
+Score every member on whatever the fleet agrees measures judgment, then map
+the scores onto the band the ratio cap implies -- 34 to 100 at a cap of 3
+(`Competence::band`) -- so that the manifest is lawful however the members
+were scored one at a time:
+
+    competence = round(34 + (raw - lowest) / (highest - lowest) * 66)
+
+For language models, Morsik's raw score is the square root of the parameter
+count, adjusted by a quantization coefficient: the square root because
+capability grows far slower than size, so a model eight times larger is not
+eight times the judgment.
+
+| Member | Parameters | Raw (sqrt of millions) | Competence |
+| --- | --- | --- | --- |
+| ship-alpha | 8 B | 89.4 | 100 |
+| ship-bravo | 3 B | 54.8 | 66 |
+| ship-charlie | 0.5 B | 22.4 | 34 |
+
+A member that decides by a deterministic calculation has no parameter count
+and does not need one. Its operator scores it on the same band by whatever it
+can defend -- agreement with the fleet's later ground truth over a run of
+cases, an instrument's calibration certificate, a published error bound --
+and writes the number in the same column. Nothing downstream can tell the two
+apart, which is the point.
+
+Two things to hold on to. A fleet of one member scored 100 and another scored
+34 is lawful and still lets the first block the threshold alone (F12); the
+cap bounds how far apart they are, not what that gap can do. And the
+normalisation is not part of the protocol, so two fleets using different
+recipes are not comparable -- the manifest is the fleet's own statement about
+itself, valid for its own epoch.
+
+### A fleet is a file (D25)
+
+`lcq-node --manifest <path>` reads the members, their competences and the
+mission epoch from a line-oriented file (`docs/three-vessels.manifest` is an
+example); `--fleet N` still gives a uniform harness fleet. The parser is
+`application::manifest`, sans-IO, and refuses loudly with a line number:
+indices that do not cover `0..n`, duplicate indices or names, a fleet past
+the acknowledgement bitmap, a competence off the scale, a spread past the
+ratio cap. Parsing ends by building the `Policy`, so a manifest that cannot
+be a fleet never reaches a vote.
+
+Building it caught a latent defect: the vote and trigger frames carried
+`1, 1, 0` for the mission epoch, event and revision instead of the constants,
+invisible while the epoch was 1 and fatal the moment a manifest named 7. Every
+frame now carries the fleet's epoch, which is what F5's rotation will need.
+
+Not signed, and the keys are still `seed_for(index)`. The file is the shape
+the manifest lifecycle will take, not the lifecycle: F4 and F5 want it
+signed, carrying each member's public key, valid for one epoch, with a node
+that refuses a fixture. The `version` directive is there so that adding the
+key column is a refusal on an old node rather than a misparse.
+
 ### What to pick up next
 
 1. **Provisioning and key lifecycle** (THREAT-MODEL F4, F5, F18) — before any

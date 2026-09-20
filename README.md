@@ -63,7 +63,7 @@ different reasons and call for different responses.
 Integer arithmetic throughout: no rounding decides a safety threshold.
 
 **Competence is a number the manifest gives a member, on a fixed scale of 1
-to 100 (D24).** The protocol never learns how it was arrived at: the square
+to 100 (D24), and the manifest is a file every member reads (D25).** The protocol never learns how it was arrived at: the square
 root of a language model's parameter count adjusted for quantisation, a
 benchmark score, an instrument's calibration record, the agreement history of
 a deterministic calculator, or a figure someone wrote down. Whoever assembles
@@ -87,6 +87,30 @@ different means. A member never declares its own competence on the air.
 - **Not a judge of competence.** The scale is taken from the manifest on
   trust; it is exactly as sound as whoever assembled it, and the manifest is
   not yet authenticated (`docs/THREAT-MODEL.md` F4).
+
+## The fleet manifest
+
+Who is in the fleet, and what each member's judgment is worth (D25). Every
+member reads the same file; `docs/three-vessels.manifest` is one to copy.
+
+```text
+# Three vessels; the second and third defer to the first.
+version 1
+epoch 7
+member 0 99 ship-alpha
+member 1 66 ship-bravo
+member 2 33 ship-charlie
+```
+
+`lcq-node --manifest <path>` takes the fleet from it. Indices must cover
+`0..n` exactly once, because a frame names its author by index; competences
+must be on the scale and within the 3:1 ratio cap, which a service can
+guarantee by scoring into the band that cap implies (34 to 100). Without
+`--manifest`, `--fleet N` gives synthetic members that all count the same,
+which is what the container suites use.
+
+Nothing in the file is signed. It is trusted as far as the file system it
+sits on, and a vessel needs more than that: see `docs/THREAT-MODEL.md` F4.
 
 ## Running a fleet
 
