@@ -54,9 +54,7 @@ fn nothing_written_can_be_confused_when_read_aloud() {
             "seed {seed} wrote a confusable letter: {written}"
         );
         assert!(
-            written
-                .chars()
-                .all(|c| c == '-' || ALPHABET.contains(c)),
+            written.chars().all(|c| c == '-' || ALPHABET.contains(c)),
             "seed {seed} wrote something outside the alphabet: {written}"
         );
     }
@@ -185,10 +183,7 @@ fn the_letter_u_is_refused_rather_than_guessed_at() {
     let typed: String = typed.into_iter().collect();
     assert_eq!(
         hand::decode(&typed),
-        Err(HandError::UnknownSymbol {
-            found: 'U',
-            at: 6
-        })
+        Err(HandError::UnknownSymbol { found: 'U', at: 6 })
     );
 }
 
@@ -202,10 +197,7 @@ fn a_character_outside_the_alphabet_names_where_it_is() {
     let typed: String = typed.into_iter().collect();
     assert_eq!(
         hand::decode(&typed),
-        Err(HandError::UnknownSymbol {
-            found: '?',
-            at: 12
-        })
+        Err(HandError::UnknownSymbol { found: '?', at: 12 })
     );
 }
 
