@@ -15,6 +15,7 @@
 mod codec;
 mod compact;
 mod crypto;
+pub mod hand;
 
 pub use codec::{Envelope, SignedEnvelope, decode, encode};
 pub use compact::{

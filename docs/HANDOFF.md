@@ -526,6 +526,31 @@ signed, carrying each member's public key, valid for one epoch, with a node
 that refuses a fixture. The `version` directive is there so that adding the
 key column is a refusal on an old node rather than a misparse.
 
+## D26 — a key that arrives by hand
+
+The operator settled who the trust root is: the fleet's administrator issues
+the key that will sign manifests and hands its public half to each vessel out
+of band, for somebody aboard to type in. That makes the encoding a human
+problem, so `wire::hand` writes a key as Crockford's base32 -- no `I`, `L`,
+`O` or `U`, `I` and `L` read back as `1`, `O` as `0`, case and separators
+ignored -- in fourteen groups of four: fifty-two symbols of key and four of
+check drawn from its `BLAKE2s` digest. A mistyped key is refused at entry
+rather than at the first manifest it cannot verify.
+
+The tests enumerate the mistakes rather than trusting the probability: every
+single-symbol substitution at every position, every transposition of
+neighbouring symbols, every swap of neighbouring groups. That found a real
+one. Fifty-two symbols hold 260 bits and a key holds 256, so the last symbol
+carries one bit of key and four of padding; the first draft rejected only one
+of those four, which let sixteen strings decode to the same key.
+
+Say the limit out loud, because it is easy to oversell. Pinning a key does
+not stop the F21 attacker -- whoever can rewrite a manifest can usually
+rewrite whatever holds the key beside it. It makes the substitution
+*detectable*, and only if the node prints the key back at every start and
+somebody compares it against the administrator's card. Manifest version 2 is
+still to build.
+
 ### What to pick up next
 
 1. **Provisioning and key lifecycle** (THREAT-MODEL F4, F5, F18) — before any

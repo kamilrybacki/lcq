@@ -1488,3 +1488,68 @@ public key, valid for one epoch, a node that refuses to run on a fixture. The
 format has room for the key column that will carry it, and the version
 directive exists so that adding one is a refusal on an old node rather than a
 misparse.
+
+## D26 — The fleet's administrator issues the key, and a person types it in
+
+**Decided by the operator, 2026-09-20.** D25 left one question open that was
+not an engineering choice: who is the root of trust for a manifest. The answer
+is that the fleet's administrator holds the key that signs manifests and hands
+its public half to each vessel out of band, for somebody aboard to enter by
+hand.
+
+**Why that fits this deployment.** A fleet is known membership by definition --
+D1 -- and it already has an administrator who decides which vessels are in it.
+There is no certificate authority at sea, no network to fetch a trust root
+from, and the one channel these vessels share is the narrow one this protocol
+is trying not to fill. Every alternative worth naming was worse. Fetching a
+root over the air makes the radio the trust root, which is the thing an
+attacker holds. Pinning on first use trusts whoever is first, which at
+commissioning is whoever is nearest. Shipping a key in the image means the
+image is the secret, and a fleet cannot rotate it without a rebuild.
+
+**So the encoding is a human problem.** This is the one value in the protocol
+whose form is dictated by a person on a moving deck rather than by a modem.
+`wire::hand` writes a key as Crockford's base32: an alphabet without `I`, `L`,
+`O` or `U`, which reads `I` and `L` back as `1` and `O` as `0`, ignores case,
+and ignores hyphens and spaces so the grouping is a convenience rather than
+part of the value. Fifty-two symbols of key, four of check, in fourteen groups
+of four.
+
+**The check symbols are twenty bits of the key's `BLAKE2s` digest.** A mistyped
+key is refused with probability `1 - 2^-20`, and refused outright: a key that
+is nearly right is not a key, so it fails at entry rather than at the first
+manifest it cannot verify. The tests do not settle for the probability. They
+enumerate the mistakes a person actually makes -- every single-symbol
+substitution at every position, every transposition of neighbouring symbols,
+every swap of neighbouring groups -- and none get through.
+
+**The whole key, not a fingerprint of it.** A shorter string would have to pin
+a key carried somewhere else, and both end up in the same file anyway, so the
+truncation buys nothing and adds a second-preimage question to size. The full
+key removes the indirection. Fifty-six symbols is typed once, at commissioning.
+A separate sixteen-symbol `fingerprint` exists for comparing by eye, and is
+explicitly not an identity: a manifest is checked against the whole key.
+
+**What this does not defend against, stated plainly.** Typing a key by hand
+says a human asserted it once. It does not protect the file it lands in.
+Whoever can rewrite a vessel's manifest can usually rewrite whatever holds the
+key beside it, so pinning does not stop the F21 attacker -- it makes the
+substitution *detectable*. That is the mechanism, not a nice-to-have: the node
+prints the key back at every start, so somebody holding the administrator's
+card can see that it changed. A deployment that never reads that line gets no
+benefit from any of this.
+
+**Writing the first canonical bit of the padding was a real bug.** Fifty-two
+symbols hold 260 bits and a key holds 256, so the last symbol carries one bit
+of key and four of padding. The first draft rejected only one padding bit,
+which let sixteen different strings decode to the same key -- a mistyped final
+symbol would have been accepted. The exhaustive substitution test caught it on
+its first run, which is the argument for writing that test at this size.
+
+**What is deliberately still open.** This decides the trust root and the way it
+reaches a vessel. It does not build manifest version 2. That still needs the
+canonicalization rule pinned *before* anything is signed, a signed body
+carrying each member's public key, the manifest's identity, its validity and
+the group key's identifier -- never the group secret -- and a node that refuses
+to run on an unsigned fixture. Those are the F4, F5 and F21 items, and they
+come next.

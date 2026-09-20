@@ -116,6 +116,15 @@ can change the membership, both quorum outcomes and the mission epoch. A
 vessel needs the signed version 2 sketched in `docs/THREAT-MODEL.md` F4 and
 F21.
 
+The key that will sign it comes from the fleet's administrator, who hands its
+public half to each vessel out of band for somebody aboard to type in (D26).
+`wire::hand` is the encoding that survives that trip: Crockford's base32,
+without the letters that get confused for digits when a key is read aloud,
+in fourteen groups of four with four check symbols. A mistyped key is refused
+when it is entered, not at the first manifest it cannot verify. Pinning a key
+this way does not stop somebody who can already write the vessel's files; it
+makes a substituted key visible to whoever holds the administrator's card.
+
 ## Running a fleet
 
 One channel emulator, then one process per member. Members hold the hub's
