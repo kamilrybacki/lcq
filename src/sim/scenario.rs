@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::domain::contracts::Subject;
-use crate::domain::quorum::{Policy, evaluate};
+use crate::domain::quorum::{Competence, Policy, evaluate};
 use crate::domain::time::Timestamp;
 use crate::sim::channel::{Topology, airtime_ms};
 use crate::sim::medium::{Reception, Transmission, duty_cycle_ok, receive};
@@ -329,12 +329,12 @@ impl Scenario {
     /// # Panics
     ///
     /// Only on an internally inconsistent fleet, which the constructors make
-    /// unreachable: weights are equal so the ratio cap holds, and every signer
+    /// unreachable: competences are equal so the ratio cap holds, and every signer
     /// comes from the manifest this function built.
     #[must_use]
     pub fn run(&self) -> Report {
-        let policy = Policy::new((0..self.fleet).map(|i| (member_id(i), 1)))
-            .expect("equal weights are always within the cap");
+        let policy = Policy::new((0..self.fleet).map(|i| (member_id(i), Competence::FULL.value())))
+            .expect("equal competences are always within the cap");
         let subject = Subject::new("sim", "evt-1", 0, [0x11; 32], Timestamp::from_secs(0))
             .expect("valid subject");
 

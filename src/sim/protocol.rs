@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use crate::application::{Journal, OutgoingFrame};
 use crate::domain::contracts::{CONSULTATION_CUTOFF_SECONDS, Opinion, Stage, Subject, Verdict};
-use crate::domain::quorum::{Policy, evaluate};
+use crate::domain::quorum::{Competence, Policy, evaluate};
 use crate::domain::state::{Case, TransitionErrorCount};
 use crate::domain::time::{Clock, FixedClock, MAX_CLOCK_SKEW_SECONDS, Timestamp};
 use crate::infrastructure::MemoryJournal;
@@ -267,8 +267,8 @@ impl Deliberation {
         let started_at = Timestamp::from_secs(1_000_000);
         let subject =
             Subject::new("mission", "evt-1", 0, [0x22; 32], started_at).expect("valid subject");
-        let policy = Policy::new((0..self.fleet).map(|i| (member_id(i), 1)))
-            .expect("equal weights are always within the cap");
+        let policy = Policy::new((0..self.fleet).map(|i| (member_id(i), Competence::FULL.value())))
+            .expect("equal competences are always within the cap");
 
         let keys: Vec<SigningKey> = (0..self.fleet)
             .map(|i| SigningKey::from_seed(seed_for(i)))

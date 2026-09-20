@@ -4,9 +4,9 @@ This is a milestone roadmap, not authorization to implement all stages. M1 has a
 
 ## M1 — Pure policy and quorum arithmetic
 
-Deliverable: installable Python package with deterministic count/weight thresholds and tests. Inputs are a validated fixed manifest policy and a set of trusted member IDs. No IO, signatures or transport.
+Deliverable: installable Python package with deterministic count/competence thresholds and tests. Inputs are a validated fixed manifest policy and a set of trusted member IDs. No IO, signatures or transport.
 
-Acceptance: 5/10/20/100-node examples; exact strict weight boundary; duplicates counted once; unknown IDs rejected; cap enforcement; exhaustive small-fleet intersection tests; explicit heavy-node blocking example. Plan: `superpowers/plans/2026-09-18-m1-quorum-policy.md`.
+Acceptance: 5/10/20/100-node examples; exact strict competence boundary; duplicates counted once; unknown IDs rejected; cap enforcement; exhaustive small-fleet intersection tests; explicit heavy-node blocking example. Plan: `superpowers/plans/2026-09-18-m1-quorum-policy.md`.
 
 ## M2 — Logical contracts and positive-only state machine
 
@@ -81,7 +81,7 @@ This milestone spans other repositories and requires separate plans/authorizatio
 
 | Design requirement | Milestone |
 |---|---|
-| Fixed manifest weights/count thresholds | M1, M4 manifest authentication |
+| Fixed manifest competences/count thresholds | M1, M4 manifest authentication |
 | Subject identity, opinions, consultation, two endorsement levels | M2, M8 provenance integration |
 | Persistent locks, counters, outbox, restart behavior | M3 |
 | Identity, encryption, signatures, replay, frame limits | M3–M4 |

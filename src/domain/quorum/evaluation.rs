@@ -32,15 +32,15 @@ impl core::error::Error for EvaluationError {}
 /// The outcome of one evaluation, with both thresholds visible separately.
 ///
 /// The two are reported apart on purpose: "not enough members" and "not enough
-/// weight" are different operational situations and call for different
+/// competence" are different operational situations and call for different
 /// responses, so collapsing them into one boolean would throw away the part an
 /// operator needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuorumResult {
     signer_count: usize,
-    support_weight: u64,
+    support_competence: u64,
     count_met: bool,
-    weight_met: bool,
+    competence_met: bool,
 }
 
 impl QuorumResult {
@@ -50,10 +50,10 @@ impl QuorumResult {
         self.signer_count
     }
 
-    /// Manifest weight behind the endorsement.
+    /// Manifest competence behind the endorsement.
     #[must_use]
-    pub fn support_weight(&self) -> u64 {
-        self.support_weight
+    pub fn support_competence(&self) -> u64 {
+        self.support_competence
     }
 
     /// Whether the member-count threshold is met.
@@ -62,10 +62,10 @@ impl QuorumResult {
         self.count_met
     }
 
-    /// Whether the weight threshold is met.
+    /// Whether the competence threshold is met.
     #[must_use]
-    pub fn weight_met(&self) -> bool {
-        self.weight_met
+    pub fn competence_met(&self) -> bool {
+        self.competence_met
     }
 
     /// Whether both thresholds are met.
@@ -76,7 +76,7 @@ impl QuorumResult {
     /// never "all clear".
     #[must_use]
     pub fn approved(&self) -> bool {
-        self.count_met && self.weight_met
+        self.count_met && self.competence_met
     }
 }
 
@@ -100,20 +100,20 @@ pub fn evaluate(
 ) -> Result<QuorumResult, EvaluationError> {
     let unique: BTreeSet<String> = signers.into_iter().collect();
 
-    let mut support_weight: u64 = 0;
+    let mut support_competence: u64 = 0;
     for signer in &unique {
-        let weight = policy
-            .weight_of(signer)
+        let competence = policy
+            .competence_of(signer)
             .ok_or(EvaluationError::UnknownSigner)?;
-        support_weight += u64::from(weight);
+        support_competence += u64::from(competence.value());
     }
 
     Ok(QuorumResult {
         signer_count: unique.len(),
-        support_weight,
+        support_competence,
         count_met: unique.len() >= policy.min_signers(),
-        // Integer arithmetic throughout: 3w > 2T rather than w/T > 2/3, so no
+        // Integer arithmetic throughout: 3c > 2T rather than c/T > 2/3, so no
         // rounding decides a safety threshold.
-        weight_met: 3 * support_weight > 2 * policy.total_weight(),
+        competence_met: 3 * support_competence > 2 * policy.total_competence(),
     })
 }

@@ -30,10 +30,12 @@ and is unchanged.
 ## Usage
 
 ```rust
-use lcq::{evaluate, Policy};
+use lcq::{evaluate, Competence, Policy};
 
+// Five members the manifest says count the same. A fleet whose members
+// differ would give each its own score on the 1..100 scale.
 let policy = Policy::new(
-    ["a", "b", "c", "d", "e"].map(|id| (id.to_string(), 1)),
+    ["a", "b", "c", "d", "e"].map(|id| (id.to_string(), Competence::FULL.value())),
 )?;
 
 let signers = ["a", "b", "c", "d"].map(str::to_string);
@@ -56,9 +58,18 @@ different reasons and call for different responses.
 | | rule | why |
 |---|---|---|
 | count | `midpoint(N, f) + 1` where `f = floor(0.4·N)` | any two approving quorums overlap in more than `f` members |
-| weight | `3·support > 2·total` | a crowd of light members cannot outvote the manifest's substance |
+| competence | `3·support > 2·total` | a crowd of less competent members cannot outvote the manifest's substance |
 
 Integer arithmetic throughout: no rounding decides a safety threshold.
+
+**Competence is a number the manifest gives a member, on a fixed scale of 1
+to 100 (D24).** The protocol never learns how it was arrived at: the square
+root of a language model's parameter count adjusted for quantisation, a
+benchmark score, an instrument's calibration record, the agreement history of
+a deterministic calculator, or a figure someone wrote down. Whoever assembles
+the manifest normalises onto the scale; everything below sees the scores and
+nothing else, which is what lets one fleet mix members that decide by wholly
+different means. A member never declares its own competence on the air.
 
 ## What this is not
 
@@ -69,9 +80,13 @@ Integer arithmetic throughout: no rounding decides a safety threshold.
   means "not endorsed", never "no danger".
 - **Not fault-tolerant at small N.** A one-member manifest is mathematically
   permitted and tolerates nothing.
-- **Not immune to a heavy member.** The 3:1 weight cap does not stop a single
-  heavy member from holding the weight threshold hostage. That is a property of
-  the design, not a defect in the code.
+- **Not immune to one very competent member.** The 3:1 competence cap does
+  not stop a single member at the top of the scale from holding the competence
+  threshold hostage. That is a property of the design, not a defect in the
+  code.
+- **Not a judge of competence.** The scale is taken from the manifest on
+  trust; it is exactly as sound as whoever assembled it, and the manifest is
+  not yet authenticated (`docs/THREAT-MODEL.md` F4).
 
 ## Running a fleet
 

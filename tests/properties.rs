@@ -7,11 +7,14 @@
 
 use std::collections::BTreeSet;
 
+use lcq::domain::quorum::Competence;
 use lcq::{Policy, evaluate};
 use proptest::prelude::*;
 
-fn equal_fleet(n: usize) -> Vec<(String, u32)> {
-    (0..n).map(|i| (i.to_string(), 1)).collect()
+fn equal_fleet(n: usize) -> Vec<(String, u8)> {
+    (0..n)
+        .map(|i| (i.to_string(), Competence::FULL.value()))
+        .collect()
 }
 
 /// Every pair of count-quorums must overlap in more members than the budget
@@ -55,23 +58,25 @@ proptest! {
     /// repeating or reordering signers changes nothing.
     #[test]
     fn integer_oracle_and_duplicate_invariance(
-        weights in prop::collection::vec(1u32..=3, 1..30),
+        // The band the 3:1 cap implies, so every sampled manifest is legal
+        // by construction rather than by rejection sampling.
+        competences in prop::collection::vec(34u8..=100, 1..30),
         prefix in 0usize..100,
     ) {
-        let members: Vec<(String, u32)> = weights
+        let members: Vec<(String, u8)> = competences
             .iter()
             .enumerate()
-            .map(|(i, w)| (i.to_string(), *w))
+            .map(|(i, c)| (i.to_string(), *c))
             .collect();
-        let policy = Policy::new(members).expect("weights within the 3:1 cap");
+        let policy = Policy::new(members).expect("competences within the 3:1 cap");
 
         let signers: Vec<String> =
             policy.members().take(prefix).map(str::to_string).collect();
         let support: u64 = signers
             .iter()
-            .map(|s| u64::from(policy.weight_of(s).expect("member")))
+            .map(|s| u64::from(policy.competence_of(s).expect("member").value()))
             .sum();
-        let total: u64 = weights.iter().map(|w| u64::from(*w)).sum();
+        let total: u64 = competences.iter().map(|c| u64::from(*c)).sum();
 
         let result = evaluate(&policy, signers.clone()).expect("known signers");
 
@@ -82,7 +87,7 @@ proptest! {
         // bounded at 30, so the overflow the lint guards against cannot occur.
         #[allow(clippy::manual_midpoint, clippy::int_plus_one)]
         let expected_count = {
-            let n = weights.len();
+            let n = competences.len();
             signers.len() >= (n + (2 * n) / 5) / 2 + 1
         };
         prop_assert_eq!(result.approved(), expected_count && 3 * support > 2 * total);

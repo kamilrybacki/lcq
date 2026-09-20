@@ -136,7 +136,8 @@ inherits the implementation's bug instead of catching it.
 
 Unchanged from the plan, and worth repeating because the code now looks
 finished: no authentication, no wire format, no persistence, no radio, no
-consultation, no model weights. `evaluate` takes signer IDs entirely on trust.
+consultation, no manifest competences beyond the fixture. `evaluate` takes
+signer IDs entirely on trust.
 Passing tests are an arithmetic oracle, not a Byzantine safety proof.
 
 ### Next gate
@@ -170,8 +171,8 @@ M1 creates only a pure, tested quorum-policy calculator. It does not authenticat
 - Positive endorsements only; no quorum output meaning “safe/no danger”.
 - Independent opinion → one consultation → optional binding support vote.
 - Up to 40% compromised members in adversarial tests; blocking is acceptable.
-- `f=floor(0.4*N)`, `q_count=floor((N+f)/2)+1`, plus STRICTLY more than 2/3 total manifest weight from the same signers.
-- Raw model weight proportional to square root of parameter count, adjusted by tunable quantization coefficient; final max:min ≤3:1.
+- `f=floor(0.4*N)`, `q_count=floor((N+f)/2)+1`, plus STRICTLY more than 2/3 total manifest competence from the same signers.
+- Competence is a manifest number on a fixed 1..100 scale (D24); the service normalises onto it. For Morsik's language models the rule is the square root of the parameter count adjusted by a quantization coefficient, mapped into the band the ratio cap implies (`Competence::band`, 34..100 at a cap of 3); final max:min ≤3:1. A member deciding by deterministic calculation or instrument reading is scored by whatever suits it and arrives the same way.
 - Two levels: fleet endorsement; additionally at least two independent originating sources with adequate provenance.
 - 5-minute consultation cutoff, 10-minute target, source expiry or synthetic default 30 minutes.
 - One alert per 10 minutes plus a burst of five; N=5,10,20 initially.
@@ -183,7 +184,7 @@ M1 creates only a pure, tested quorum-policy calculator. It does not authenticat
 
 ## Important subtleties
 
-1. A 3:1 weight cap does not prevent a single heavy member from blocking the weight threshold. Report this explicitly.
+1. A 3:1 competence cap does not prevent a single member at the top of the scale from blocking the competence threshold. Report this explicitly.
 2. The 40% figure does not promise liveness. Count-quorum intersection is not a whole BFT proof.
 3. Real source independence cannot be established from a compromised member's signed assertion alone. Simulator ground truth must stay outside node-visible state.
 4. `Event.id` and `Cluster.id` in existing Morsik are local identities, not fleet-wide event identities. The integration requires a stable upstream subject contract.
@@ -432,6 +433,29 @@ Still open from the review, and only a board can answer: whether the
 Wio-SX1262 carries the DC-DC inductor (the schematic was not conclusive, so
 day one tries both), and whether RXEN high in receive is right (measure
 sensitivity both ways, do not infer it from one successful packet).
+
+### Competence replaces weight (D24)
+
+The manifest's `u32` weight is now `Competence`, a validated 1..100 score, and
+the vocabulary no longer assumes the member is a language model. What it
+measures is decided wherever the manifest is assembled -- the square root of
+a parameter count adjusted for quantisation for Morsik's models, a benchmark,
+a calibration record, the agreement history of a deterministic calculator --
+and normalised onto the scale before it reaches the protocol, which never
+learns which. This is what lets one fleet hold members that reach a verdict
+by wholly different means.
+
+The arithmetic is untouched: `3 * support > 2 * total` in integers, beside
+the count threshold. Renamed through the domain, the node, the simulator and
+the tests: `weight_of` to `competence_of`, `total_weight` to
+`total_competence`, `support_weight` to `support_competence`, `weight_met` to
+`competence_met`, and the three matching `PolicyError` variants.
+
+It is not on the wire and must not be: a self-declared competence is a member
+voting itself heavier. `Competence::band(max_ratio)` gives the range a service
+can score into so that its manifest satisfies the ratio cap by construction
+(34..100 at a cap of 3); scoring outside it is allowed and `Policy::new`
+rejects an illegal spread loudly.
 
 ### What to pick up next
 

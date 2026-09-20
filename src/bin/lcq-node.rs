@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use lcq::domain::contracts::{
     BINDING_STAGE_OPENS_SECONDS, ENDORSEMENT_TARGET_SECONDS, Opinion, Stage, Subject, Verdict,
 };
-use lcq::domain::quorum::{Policy, evaluate};
+use lcq::domain::quorum::{Competence, Policy, evaluate};
 use lcq::domain::state::{Case, TransitionError};
 use lcq::domain::time::{Clock, Timestamp};
 use lcq::infrastructure::rnode::RNodeRadio;
@@ -187,7 +187,10 @@ fn main() {
         .collect();
     let manifest: Vec<VerifyingKey> = keys.iter().map(SigningKey::verifying_key).collect();
     let group = GroupKey::from_bytes(GROUP_KEY);
-    let policy = Policy::new((0..options.fleet).map(|i| (member_id(i), 1))).expect("policy");
+    // The harness has no service to normalise anything, so every member
+    // counts fully and the ratio cap is trivially satisfied.
+    let policy = Policy::new((0..options.fleet).map(|i| (member_id(i), Competence::FULL.value())))
+        .expect("policy");
 
     // Recovering the journal IS the restart path. Anything already committed is
     // read back here, including a vote lock that must not be taken twice.

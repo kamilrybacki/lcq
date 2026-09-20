@@ -1366,3 +1366,45 @@ round trips for a median and a p95 -- and names the lowest one that failed,
 so that a board which will not come up is a firmware, cable, pin-map, power
 or driver problem and not all five at once. It runs against the reference
 device in the test suite, so the tool is qualified before the boards are.
+
+## D24 — A member's standing is a competence on a fixed scale, and the protocol never learns what it measures
+
+**Decided and implemented 2026-09-20.** The manifest gave each member an
+unbounded `u32` weight, and the only written rule for choosing one was
+Morsik's: the square root of a language model's parameter count, adjusted by
+a quantization coefficient, capped at 3:1. Two things were wrong with that.
+It tied the protocol's vocabulary to one kind of member, when the fleet this
+is for may just as well hold a vessel that decides by a deterministic
+calculation or an instrument reading. And an unbounded number invites a
+manifest to say 4 000 000 000, which means nothing to anyone reading it.
+
+So: `Competence`, a validated number from 1 to 100. The manifest carries it,
+`Policy` validates it at construction, and the threshold arithmetic is
+unchanged -- still `3·support > 2·total` in integers, still alongside the
+count threshold. What changed is what the number *is*: a normalised statement
+of how much a member's judgment is worth, produced wherever the manifest is
+assembled, by whatever means suits that fleet. The square root of a parameter
+count is one recipe among several; a benchmark score, a calibration record or
+a figure a harbourmaster wrote down all arrive identically. Nothing below the
+manifest can tell them apart, which is exactly what lets one fleet mix
+members that decide by different means.
+
+**It is not on the wire, and that is the point.** A frame carries the
+author's index and its verdict, never its standing. A self-declared
+competence is a member voting itself heavier; bound to the manifest instead,
+it would be bytes spent on something every member already holds. Competence
+is therefore exactly as trustworthy as the manifest, which is `THREAT-MODEL`
+F4 and still open.
+
+**The ratio cap and the fixed scale had to be reconciled.** The 3:1 cap is a
+property of the whole fleet -- the most competent member may not exceed three
+times the least -- so a service that scores members one at a time cannot know
+whether its manifest is legal until it assembles it. `Competence::band`
+answers that: at a cap of 3 it returns 34 to 100, and any set of scores in
+that band satisfies the cap by construction. A service may also score freely
+and let `Policy::new` reject the spread, which it does loudly. Both are
+supported; the band is the recommendation.
+
+Kept deliberately: the cap does not stop one member at the top of the scale
+from blocking the threshold (F12). That remains a property of the design, now
+stated in the scale's own terms.

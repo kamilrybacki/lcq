@@ -27,7 +27,7 @@ The design discussion was in Polish; code and identifiers should be English. No 
 - Do not silently convert proposed engineering choices into user-approved requirements. Confirm the technical profile before crypto/wire-format implementation.
 - Do not use packet loss alone as a claim of LoRa fidelity. Record the limitations of PHY/collision models.
 - Do not call passing tests a formal security proof, certify model truth, or claim progress under 40% Byzantine participation.
-- No automatic fleet membership changes, threshold reduction on disconnection, model self-assigned weights, or recovery by resetting nonce counters under an existing key.
+- No automatic fleet membership changes, threshold reduction on disconnection, self-assigned competence (D24: a member's standing comes from the manifest, never from the member), or recovery by resetting nonce counters under an existing key.
 - A positive-only endorsement protocol is not a blockchain and is not a complete generic BFT consensus algorithm.
 - A local broker is not the durable safety journal. A group encryption secret is not sender authentication.
 - Before commits, run checks and record exact commands/results. Never fabricate PASS results or operator approval.

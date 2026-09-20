@@ -10,7 +10,7 @@ defences named below are exercised rather than described.
 
 | asset | why it matters | where it lives |
 |---|---|---|
-| **No fabricated quorum** | the whole point: an endorsement means ≥ threshold *genuine* members committed | signatures over the transcript (`wire/compact.rs`), count and weight thresholds (`domain/quorum`), one vote per member per case (`domain/state`, journal lock) |
+| **No fabricated quorum** | the whole point: an endorsement means ≥ threshold *genuine* members committed | signatures over the transcript (`wire/compact.rs`), count and competence thresholds (`domain/quorum`), one vote per member per case (`domain/state`, journal lock) |
 | **Liveness within bounds** | a blocked fleet is safe but useless | slots on the trigger anchor, repair rounds, relaying, airtime budget (`lcq-node`, `application/budget.rs`) |
 | **Member signing keys** | forge a member | provisioned out of band; today constants in the harness binary (F4) |
 | **Group key** | membership: read the channel, put frames on it that open | shared symmetric key; same caveat (F4, F5) |
@@ -80,7 +80,7 @@ defences named below are exercised rather than described.
 | **F9** | Info | Logs: counts, indices, timings, RSSI. No frame bytes, no keys, no hex dumps (checked). | Keep it so; `report` is the only log path. |
 | **F10** | Low | Verification amplification: a member (A1) can put verifiable-looking frames on the air at the channel's rate and cost every receiver an ed25519 check each. | Bounded by airtime -- at SF10 one member can force at most one ed25519 check per ~1.2 s, about 1 ms on a Raspberry Pi, under 0.1 % of a core -- refused before verification if replayed, metered (`verifications`). Recommended: per-sender rate — a member sending more than the schedule allows is dropped before verification and noted as evidence. |
 | **F11** | Low | Clocks: pairwise skew up to 30 s is designed for; a spoofed GNSS time on one member shifts its local deadlines. | Liveness only: the schedule anchors on the trigger's end (D6, D7), and a member with a bad clock refuses or is refused, never counts twice. |
-| **F12** | Info | A heavy member can hold the weight threshold hostage (README). | Documented property. |
+| **F12** | Info | A member at the top of the competence scale can hold the competence threshold hostage (README). Competence itself is taken from the manifest on trust; a member never declares its own (D24), so this is a manifest-integrity question, not an on-air one. | Documented property; the manifest's integrity is F4. |
 | **F13** | Low | The journal file is created with the process umask. | **Fixed**: mode 0600 on creation (unix). It holds ciphertext, not keys, but nobody else needs to read it. |
 | **F14** | Info | A malicious USB "RNode" can inject bytes; the deframer is bounded and every frame still needs the group key and a manifest key. | Accepted; the modem is on the trusted side of the USB port. |
 | **F15** | Info | On-air metadata is not hidden: the cleartext header names the author index and sequence, and slots, timing and frame counts are observable. | By design; stated here so nobody expects the AEAD to hide who spoke. |

@@ -20,4 +20,6 @@ pub mod infrastructure;
 pub mod sim;
 pub mod wire;
 
-pub use domain::quorum::{EvaluationError, Policy, PolicyError, QuorumResult, evaluate};
+pub use domain::quorum::{
+    Competence, EvaluationError, Policy, PolicyError, QuorumResult, evaluate,
+};
