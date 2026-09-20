@@ -94,27 +94,40 @@ Who is in the fleet, and what each member's judgment is worth (D25). Every
 member reads the same file; `docs/three-vessels.manifest` is one to copy.
 
 ```text
-# Three vessels; the second and third defer to the first.
-version 1
+version 2
 epoch 7
-member 0 99 ship-alpha
-member 1 66 ship-bravo
-member 2 33 ship-charlie
+valid-from 1789000000
+valid-until 1792000000
+group-key 3f0a...                 an opaque name, never the secret
+byzantine-bps 4000
+max-competence-ratio 3
+phy-profile eu868-sf10-v1
+heard-capacity 64
+member 0 100 8a1c... ship-alpha   index, competence, public key, label
+member 1 66 42d9... ship-bravo
+issuer 8VQ4-3JX0-Z9T2-K7MP        which card signed it; a hint, not a decision
+signature 91be...                 over the canonical form, not over this text
 ```
 
-`lcq-node --manifest <path>` takes the fleet from it. Indices must cover
-`0..n` exactly once, because a frame names its author by index; competences
-must be on the scale and within the 3:1 ratio cap, which a service can
-guarantee by scoring into the band that cap implies (34 to 100). Without
-`--manifest`, `--fleet N` gives synthetic members that all count the same,
-which is what the container suites use.
+`lcq-node --manifest <path> --admin-key <card>` takes the fleet from it.
+Indices must cover `0..n` exactly once, because a frame names its author by
+index; competences must be on the scale and within the 3:1 ratio cap, which a
+service can guarantee by scoring into the band that cap implies (34 to 100).
+Without `--manifest`, `--fleet N` gives synthetic members that all count the
+same, which is what the container suites use.
 
-Nothing in the file is signed, so it is a development and harness format
-for now. It is not at the journal's trust level: a journal is one member's
-own state, while this is the fleet's root policy, and whoever can write it
-can change the membership, both quorum outcomes and the mission epoch. A
-vessel needs the signed version 2 sketched in `docs/THREAT-MODEL.md` F4 and
-F21.
+The signature covers a canonical form built after parsing, so two files that
+describe the same fleet with different comments, spacing or member order sign
+to the same bytes and have the same identity. That identity is the digest of
+those bytes, computed rather than typed. A node acts on a manifest only once
+it verifies, and refuses to start on an unknown version, a bad signature, a
+window that has not opened or has closed, a local key the manifest does not
+name for its index, or an epoch its own journal has already spent (D27).
+
+Signing one is `lcq-manifest sign --key <secret> --in <file>`; checking one is
+`lcq-manifest verify --admin-key <card> --in <file>`; and `lcq-manifest
+fingerprint --key <secret>` prints both the string that goes on the card and
+the short form a node prints back at every start.
 
 The key that will sign it comes from the fleet's administrator, who hands its
 public half to each vessel out of band for somebody aboard to type in (D26).

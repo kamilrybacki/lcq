@@ -19,6 +19,7 @@ extern crate alloc;
 /// A journal held in memory.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryJournal {
+    epoch: Option<u16>,
     locks: BTreeSet<String>,
     pending: BTreeMap<u64, OutgoingFrame>,
     next_sequence: u64,
@@ -30,6 +31,7 @@ impl MemoryJournal {
     #[must_use]
     pub fn restored(snapshot: JournalSnapshot) -> Self {
         Self {
+            epoch: snapshot.epoch,
             locks: snapshot.vote_locks.into_iter().map(|(k, _)| k).collect(),
             pending: snapshot
                 .pending
@@ -101,8 +103,21 @@ impl Journal for MemoryJournal {
             .map(|(author, frame)| (author.as_str(), frame.as_slice()))
     }
 
+    fn epoch(&self) -> Option<u16> {
+        self.epoch
+    }
+
+    fn enter_epoch(&mut self, epoch: u16) -> Result<(), JournalError> {
+        if self.epoch.is_some_and(|held| held >= epoch) {
+            return Ok(());
+        }
+        self.epoch = Some(epoch);
+        Ok(())
+    }
+
     fn snapshot(&self) -> JournalSnapshot {
         JournalSnapshot {
+            epoch: self.epoch,
             vote_locks: self.locks.iter().map(|k| (k.clone(), 0)).collect(),
             pending: self.pending.values().cloned().collect(),
             next_sequence: self.next_sequence,

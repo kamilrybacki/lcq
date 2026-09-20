@@ -540,3 +540,83 @@ fn a_journal_opened_with_entropy_never_starts_from_zero_and_keeps_its_start() {
     let plain = open(&first_path);
     assert_eq!(plain.next_sequence(), first_start + 1);
 }
+
+/* ------------------------------------------------------------------ *
+ * The epoch a journal has run under.                                  *
+ * ------------------------------------------------------------------ */
+
+#[test]
+fn a_fresh_journal_has_never_run_under_an_epoch() {
+    let scratch = Scratch::new("epoch-fresh");
+    let journal = open(&scratch.file("journal.log"));
+    assert_eq!(journal.epoch(), None);
+}
+
+#[test]
+fn the_epoch_survives_the_process_that_entered_it() {
+    let scratch = Scratch::new("epoch-restart");
+    let path = scratch.file("journal.log");
+    {
+        let mut journal = open(&path);
+        journal.enter_epoch(7).expect("epoch recorded");
+        assert_eq!(journal.epoch(), Some(7));
+    }
+    assert_eq!(
+        open(&path).epoch(),
+        Some(7),
+        "a restart must know which epoch it was flying"
+    );
+}
+
+#[test]
+fn an_epoch_only_ever_moves_forward() {
+    let scratch = Scratch::new("epoch-monotonic");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+
+    journal.enter_epoch(9).expect("epoch recorded");
+    // Entering an older one is a no-op rather than a rewind: whoever is
+    // holding this journal does not get to un-spend an epoch by asking.
+    journal.enter_epoch(3).expect("accepted and ignored");
+    assert_eq!(journal.epoch(), Some(9));
+    journal.enter_epoch(9).expect("re-entering the same one");
+    assert_eq!(journal.epoch(), Some(9));
+
+    journal
+        .enter_epoch(11)
+        .expect("a later epoch is a rotation");
+    assert_eq!(journal.epoch(), Some(11));
+    drop(journal);
+    assert_eq!(open(&path).epoch(), Some(11));
+}
+
+#[test]
+fn compaction_does_not_forget_the_epoch() {
+    let scratch = Scratch::new("epoch-compaction");
+    let path = scratch.file("journal.log");
+    let mut journal = open(&path);
+    journal.enter_epoch(5).expect("epoch recorded");
+    for n in 0..8u32 {
+        vote(&mut journal, n, u64::from(n) + 1).expect("votes commit");
+    }
+    journal.compact().expect("compaction succeeds");
+
+    // Compaction rewrites the file from the live state, so an epoch it dropped
+    // would leave a journal that looks like it has never run -- which is what
+    // a rollback wants to look like.
+    assert_eq!(journal.epoch(), Some(5));
+    assert_eq!(open(&path).epoch(), Some(5));
+}
+
+#[test]
+fn the_snapshot_carries_the_epoch_to_a_restored_journal() {
+    let scratch = Scratch::new("epoch-snapshot");
+    let mut journal = open(&scratch.file("journal.log"));
+    journal.enter_epoch(4).expect("epoch recorded");
+    let snapshot = journal.snapshot();
+    assert_eq!(snapshot.epoch, Some(4));
+    assert_eq!(
+        lcq::infrastructure::MemoryJournal::restored(snapshot).epoch(),
+        Some(4)
+    );
+}

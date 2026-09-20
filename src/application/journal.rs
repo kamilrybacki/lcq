@@ -97,6 +97,8 @@ impl OutgoingFrame {
 /// A restorable view of everything that must survive a restart.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JournalSnapshot {
+    /// The highest mission epoch this journal has ever run under, if any.
+    pub epoch: Option<u16>,
     /// `(mission, event, revision, content hash, voter)` for every held lock.
     pub vote_locks: Vec<(alloc::string::String, u64)>,
     /// Frames not yet acknowledged.
@@ -181,5 +183,24 @@ pub trait Journal {
     fn witnessed(&self) -> impl Iterator<Item = (&str, &[u8])>;
 
     /// Everything that must survive a restart.
+    /// The highest mission epoch this journal has ever run under.
+    ///
+    /// `None` on a journal that has never been entered. A node compares this
+    /// against the epoch its manifest names, and refuses to run under an older
+    /// one: restoring an old journal rewinds the sequence counter and reuses
+    /// nonces exactly as losing one does (`THREAT-MODEL.md` F1, F18).
+    fn epoch(&self) -> Option<u16>;
+
+    /// Record that this journal is running under `epoch`.
+    ///
+    /// Durable before it returns, like every other fact here, and monotonic: a
+    /// journal that has seen an epoch never afterwards claims an older one.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::NotDurable`] if it could not be written.
+    fn enter_epoch(&mut self, epoch: u16) -> Result<(), JournalError>;
+
+    /// Everything a restart has to agree with.
     fn snapshot(&self) -> JournalSnapshot;
 }

@@ -617,3 +617,42 @@ next step, rather than left to be derived again.
 
 Equivocation on the trigger (D6, D10) and acknowledgement on the air (D8) used
 to head this list; both are built and measured in containers.
+
+## D27 — the manifest is signed, and the node acts on nothing else
+
+Version 1 of the manifest is gone rather than deprecated: an unsigned fleet
+description had one reason to exist and D26 removed it. Version 2 carries the
+mission epoch, a validity window, an opaque group-key id, the fault budget and
+the ratio cap, the `PHY` profile and the acknowledgement capacity, each
+member's index, competence, 32-byte public key and operator label, then an
+issuer fingerprint and a signature.
+
+What is signed is a canonical form built after parsing, not the text: a domain
+tag, fixed field order, fixed widths, length prefixes, members in index order.
+Two files that describe the same fleet with different comments, spacing or
+member order produce identical bytes, and a test asserts it. The manifest's
+identity is the digest of those bytes, computed rather than declared, which is
+also the digest F2 will scope a replay window by.
+
+`lcq-node --manifest <path> --admin-key <card>` verifies before it believes.
+It fails closed on an unknown version, a bad signature, a window that has not
+opened or has closed, an index outside the fleet, a local key the manifest
+does not name for that index, and an epoch its journal has already spent. Four
+of those are tested against real processes in `tests/multiprocess.rs`.
+
+The journal now records the mission epoch it runs under: monotonic, durable,
+and preserved across compaction -- compaction rewrites the file from live
+state, so an epoch it dropped would leave a journal that looks like it never
+ran, which is what a rollback wants to look like. The group key follows the
+epoch (`GroupKey::fixture_for_epoch`, labelled the insecure fixture it is), so
+rotating after a loss or a restore actually changes the keystream. None of
+this detects a restore; it makes reusing a spent epoch fail closed. F18 stays
+open against deployment.
+
+New tool `lcq-manifest`: `sign` for the administrator, `verify` for a vessel
+or a reviewer, `fingerprint` for the card and the short form. Both it and the
+node refuse to read a secret key file anybody else can read.
+
+Still missing, and named as such: the group key as a real secret, each
+member's signing key generated on its own device, and the rotation path when a
+member is excluded (F5).

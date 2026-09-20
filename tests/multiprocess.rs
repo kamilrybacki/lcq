@@ -13,16 +13,18 @@
 //! the schedule falls apart for reasons that have nothing to do with the
 //! protocol.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lcq::application::Journal;
+use lcq::application::{Journal, Manifest};
 use lcq::domain::contracts::Subject;
 use lcq::domain::time::Timestamp;
 use lcq::infrastructure::LogJournal;
+use lcq::wire::{SigningKey, hand};
 
 const HUB: &str = env!("CARGO_BIN_EXE_lcq-hub");
 const NODE: &str = env!("CARGO_BIN_EXE_lcq-node");
@@ -233,6 +235,51 @@ fn put_to_sea(fleet: usize, port: u16, dir: &Path) -> Vec<Running> {
     nodes
 }
 
+/// The administrator's key for these tests. An insecure fixture: a real one
+/// never leaves the person who issues manifests.
+fn admin() -> SigningKey {
+    SigningKey::from_seed([7; 32])
+}
+
+/// The key the harness derives for a member from its index, which is what a
+/// node without `--signing-key` will hold.
+fn harness_key(index: usize) -> SigningKey {
+    let mut seed = [0; 32];
+    let tag = (index as u64 + 1).to_be_bytes();
+    seed[..8].copy_from_slice(&tag);
+    SigningKey::from_seed(seed)
+}
+
+/// Write a signed manifest and the card a vessel was given, as a fleet's
+/// administrator would (D26, D27).
+fn write_fleet(manifest: &Path, admin_key: &Path, epoch: u16, competences: &[u8]) {
+    let mut body = format!(
+        "version 2
+epoch {epoch}
+valid-from 1
+valid-until 4000000000
+group-key {group}
+byzantine-bps 4000
+max-competence-ratio 3
+phy-profile eu868-sf10-v1
+heard-capacity 64
+",
+        group = "0".repeat(63) + "1",
+    );
+    for (index, competence) in competences.iter().enumerate() {
+        let mut key = String::with_capacity(64);
+        for byte in harness_key(index).verifying_key().to_bytes() {
+            write!(key, "{byte:02x}").expect("a string never fails to grow");
+        }
+        writeln!(body, "member {index} {competence} {key} ship-{index}")
+            .expect("a string never fails to grow");
+    }
+    let signed = Manifest::sign_text(&body, &admin()).expect("the administrator signs it");
+    std::fs::write(manifest, signed).expect("manifest written");
+    std::fs::write(admin_key, hand::encode(&admin().verifying_key().to_bytes()))
+        .expect("the card a vessel was given");
+}
+
 fn node(index: usize, fleet: usize, port: u16, journal: &Path, opens_round: bool) -> Command {
     let mut command = Command::new(NODE);
     command
@@ -320,11 +367,8 @@ fn a_fleet_described_by_a_manifest_endorses_with_the_competences_it_names() {
     // thing that says what each one's judgment is worth (D24, D25). The
     // spread is the widest the 3:1 cap allows.
     let manifest = scratch.0.join("fleet.manifest");
-    std::fs::write(
-        &manifest,
-        "version 1\nepoch 7\nmember 0 99 ship-alpha\nmember 1 66 ship-bravo\nmember 2 33 ship-charlie\n",
-    )
-    .expect("manifest written");
+    let admin_key = scratch.0.join("admin.pub");
+    write_fleet(&manifest, &admin_key, 7, &[99, 66, 33]);
 
     let hub = Hub::start(3);
     let mut nodes: Vec<Running> = Vec::new();
@@ -337,6 +381,7 @@ fn a_fleet_described_by_a_manifest_endorses_with_the_competences_it_names() {
             false,
         );
         command.args(["--manifest", &manifest.to_string_lossy()]);
+        command.args(["--admin-key", &admin_key.to_string_lossy()]);
         let running = Running::start(command);
         assert!(
             running.await_line("\"start\"", Duration::from_secs(30)),
@@ -346,6 +391,7 @@ fn a_fleet_described_by_a_manifest_endorses_with_the_competences_it_names() {
     }
     let mut opener = node(0, 3, hub.port, &scratch.0.join("n0.journal"), true);
     opener.args(["--manifest", &manifest.to_string_lossy()]);
+    opener.args(["--admin-key", &admin_key.to_string_lossy()]);
     nodes.insert(0, Running::start(opener));
 
     let finals: Vec<Final> = nodes.iter_mut().map(Running::finish).collect();
@@ -377,7 +423,7 @@ fn a_fleet_described_by_a_manifest_endorses_with_the_competences_it_names() {
     let journal = LogJournal::open(scratch.0.join("n1.journal")).expect("journal opens");
     let locks = journal.snapshot().vote_locks;
     assert!(
-        locks.iter().any(|(key, _)| key.contains("ship-bravo")),
+        locks.iter().any(|(key, _)| key.contains("ship-1")),
         "the vote lock should name the member the manifest named, got {:?}",
         locks.iter().map(|(key, _)| key).collect::<Vec<_>>()
     );
@@ -548,4 +594,123 @@ fn the_emulator_holds_the_channel_for_one_frame_at_a_time() {
     for running in &mut nodes {
         running.kill();
     }
+}
+
+/// Start a node that should refuse to run, and give back what it said.
+///
+/// No hub: every refusal here happens while the node is working out what it is
+/// allowed to believe, which is before it opens a radio.
+fn refuses(command: &mut Command) -> String {
+    let output = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("the node runs");
+    assert!(
+        !output.status.success(),
+        "the node started when it should have refused"
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn a_node_refuses_a_manifest_no_card_it_holds_signed() {
+    let scratch = Scratch::new("wrong-card");
+    let manifest = scratch.0.join("fleet.manifest");
+    let admin_key = scratch.0.join("admin.pub");
+    write_fleet(&manifest, &admin_key, 7, &[99, 66, 33]);
+
+    // The same fleet, but the vessel was given somebody else's card.
+    let other = scratch.0.join("other.pub");
+    std::fs::write(
+        &other,
+        hand::encode(&SigningKey::from_seed([9; 32]).verifying_key().to_bytes()),
+    )
+    .expect("another card");
+
+    let mut command = node(0, 3, 9, &scratch.0.join("n0.journal"), false);
+    command.args(["--manifest", &manifest.to_string_lossy()]);
+    command.args(["--admin-key", &other.to_string_lossy()]);
+    let said = refuses(&mut command);
+    assert!(
+        said.contains("signature does not check out"),
+        "expected a refusal about the signature, got {said:?}"
+    );
+}
+
+#[test]
+fn a_node_refuses_a_manifest_with_no_key_to_check_it_against() {
+    let scratch = Scratch::new("no-card");
+    let manifest = scratch.0.join("fleet.manifest");
+    let admin_key = scratch.0.join("admin.pub");
+    write_fleet(&manifest, &admin_key, 7, &[99, 66, 33]);
+
+    let mut command = node(0, 3, 9, &scratch.0.join("n0.journal"), false);
+    command.args(["--manifest", &manifest.to_string_lossy()]);
+    let said = refuses(&mut command);
+    assert!(
+        said.contains("--admin-key"),
+        "expected a refusal naming the missing key, got {said:?}"
+    );
+}
+
+#[test]
+fn a_node_refuses_a_manifest_whose_window_has_closed() {
+    let scratch = Scratch::new("expired");
+    let manifest = scratch.0.join("fleet.manifest");
+    let admin_key = scratch.0.join("admin.pub");
+    write_fleet(&manifest, &admin_key, 7, &[99, 66, 33]);
+
+    // Re-sign it with a window that shut in 1971, so the refusal is about the
+    // window and not about a signature the edit would have broken.
+    let text = std::fs::read_to_string(&manifest).expect("read it back");
+    let closed = text.replace("valid-until 4000000000", "valid-until 40000000");
+    let resigned = Manifest::sign_text(&closed, &admin()).expect("still signable");
+    std::fs::write(&manifest, resigned).expect("write it back");
+
+    let mut command = node(0, 3, 9, &scratch.0.join("n0.journal"), false);
+    command.args(["--manifest", &manifest.to_string_lossy()]);
+    command.args(["--admin-key", &admin_key.to_string_lossy()]);
+    let said = refuses(&mut command);
+    assert!(
+        said.contains("closed at"),
+        "expected a refusal about the window, got {said:?}"
+    );
+}
+
+#[test]
+fn a_node_refuses_to_run_under_an_epoch_its_journal_has_already_spent() {
+    let scratch = Scratch::new("rollback");
+    let journal_path = scratch.0.join("n0.journal");
+    {
+        // This vessel has already flown epoch 9.
+        let mut journal = LogJournal::open_with_entropy(&journal_path).expect("journal opens");
+        journal.enter_epoch(9).expect("epoch recorded");
+    }
+
+    // Somebody hands it a manifest for epoch 7 -- a perfectly valid, properly
+    // signed manifest, from an epoch this journal has already spent. Running
+    // it would seal fresh frames under a key and a sequence range the fleet
+    // has already used (F1, F18).
+    let manifest = scratch.0.join("fleet.manifest");
+    let admin_key = scratch.0.join("admin.pub");
+    write_fleet(&manifest, &admin_key, 7, &[99, 66, 33]);
+
+    let mut command = node(0, 3, 9, &journal_path, false);
+    command.args(["--manifest", &manifest.to_string_lossy()]);
+    command.args(["--admin-key", &admin_key.to_string_lossy()]);
+    let said = refuses(&mut command);
+    assert!(
+        said.contains("has run under epoch 9"),
+        "expected a refusal about the spent epoch, got {said:?}"
+    );
+
+    // The same journal under a later epoch is fine: that is the remedy, not
+    // the fault.
+    let later = scratch.0.join("later.manifest");
+    write_fleet(&later, &admin_key, 11, &[99, 66, 33]);
+    let mut journal = LogJournal::open_with_entropy(&journal_path).expect("journal reopens");
+    assert_eq!(journal.epoch(), Some(9));
+    journal.enter_epoch(11).expect("a later epoch is allowed");
+    assert_eq!(journal.epoch(), Some(11));
 }

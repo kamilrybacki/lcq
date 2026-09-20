@@ -1587,3 +1587,89 @@ carrying each member's public key, the manifest's identity, its validity and
 the group key's identifier -- never the group secret -- and a node that refuses
 to run on an unsigned fixture. Those are the F4, F5 and F21 items, and they
 come next.
+
+## D27 — A manifest is signed, and a node acts on nothing else
+
+D25 made the fleet a file and said plainly that the file was not a security
+boundary. D26 settled who the root of trust is: the fleet's administrator,
+whose key reaches a vessel by hand. This is the two of them joined. Version 1
+of the manifest format is gone rather than deprecated, because an unsigned
+fleet description had exactly one reason to exist and no longer has it.
+
+**What a manifest now says.** The mission epoch, a validity window, an opaque
+group-key id, the fault budget and the competence ratio cap, the `PHY` profile
+this fleet flies and the acknowledgement capacity it was built against, then
+one line per member: the index a frame names it by, its competence, its
+32-byte public key, and an operator label. Then an issuer fingerprint and a
+signature.
+
+**The signature covers bytes, not the text.** What is signed is a canonical
+form built *after* parsing: a domain tag, a fixed field order, a fixed width
+for every number, length prefixes rather than separators, members in index
+order. Signing the text would have made a fleet's meaning depend on how
+somebody typed it, and would have let two files that describe the same fleet
+disagree about whether they are the same fleet. Two spellings of one fleet --
+different comments, different spacing, members listed in another order -- now
+produce identical bytes and an identical identity, and a test asserts it.
+
+**The identity is computed, not declared.** A manifest's id is the digest of
+those canonical bytes. An earlier draft had the operator type a 32-byte id as
+hex, which was 64 characters that nothing could check and that two manifests
+could share by accident. Computing it removes the typing, makes the identity
+unforgeable by construction, and hands F2 the digest it needs to scope a
+replay window.
+
+**One value, one spelling.** Numbers are plain decimal with no sign and no
+leading zero. Hexadecimal is lowercase. Labels are letters, digits, a dash and
+an underscore, at most 32 bytes. Duplicate directives, duplicate indices,
+duplicate labels and duplicate public keys are all refused before anything is
+canonicalized -- a duplicate key especially, because two seats behind one key
+would let one holder sign twice and look like two signers to a quorum.
+
+**What a node refuses.** An unknown version, a signature that does not check
+out against the administration key it holds, a window that has not opened or
+has closed, an index outside the fleet, a local signing key the manifest does
+not name for that index, and an epoch its own journal has already spent. Each
+of those is a refusal to start, not a warning: a manifest that does not verify
+is not a weaker manifest, it is not one. Four of them are tested against real
+processes.
+
+**Two key files, and they are not the same kind of thing.** `--admin-key` is
+public: the Crockford string from D26 as the crew typed it off a card.
+`--signing-key` is this device's own secret, 32 bytes of hexadecimal, and both
+the node and `lcq-manifest` refuse to read one that anybody but its owner can
+read. A bring-up run without `--signing-key` falls back to the harness
+derivation and still has to match the manifest, so a fixture fleet and a real
+one cannot be mistaken for each other.
+
+**The group key follows the epoch.** The manifest names the key and never
+carries it. `GroupKey::fixture_for_epoch` derives one from that public name
+and the epoch, and is labelled in its own documentation as the insecure
+fixture it is -- anybody holding the manifest can compute it. It is here for
+one property the harness needs before real provisioning exists: **a new epoch
+is a new key**. Without that, rotating the epoch after a lost or restored
+journal would change a number while the keystream stayed the same, and F1 and
+F18 would have no remedy to point at.
+
+**Anti-rollback, and what it is not.** A journal now records the mission epoch
+it runs under: monotonically, durably, and across compaction -- compaction
+rewrites the file from live state, so an epoch it dropped would leave a
+journal that looks like it has never run, which is exactly what a rollback
+wants to look like. A node refuses a manifest naming an epoch its journal has
+already spent. This does **not** detect a restore. Nothing a node stores can
+detect its own restoration, and a restore that carries the manifest back too
+looks like an ordinary boot. What the rule does is make reusing a spent epoch
+fail closed. F18 stays open against deployment until there is storage the host
+cannot rewind.
+
+**There is a tool, because a format nobody can sign is not a format.**
+`lcq-manifest sign` is what the administrator runs, `verify` is what a vessel
+or a reviewer runs, and `fingerprint` prints both the string that goes on the
+card and the short form the node prints back at every start. The example
+manifest this repository ships is signed by an all-sevens fixture key and says
+so in its own first lines: it shows the shape, and anybody can forge it.
+
+**What is deliberately still missing.** The group key as an actual secret,
+each member's signing key generated on its own device, and the rotation path
+when a member is excluded (F5). Those are provisioning and governance, not
+protocol, and the format has the fields they will fill.

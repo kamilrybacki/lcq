@@ -41,9 +41,12 @@ use lcq::infrastructure::sx126x::{
 };
 use lcq::infrastructure::{HubRadio, LogJournal, ScaledClock};
 use lcq::sim::airtime_ms;
+use std::fmt::Write as _;
+
 use lcq::wire::{
     CompactEnvelope, GroupKey, Heard, MAX_FRAME_BYTES, RoundId, SigningKey, VerifyingKey,
-    case_reference, decode_compact, encode_compact, open_frame, peek_frame_header, seal_frame,
+    case_reference, decode_compact, encode_compact, hand, open_frame, peek_frame_header,
+    seal_frame,
 };
 
 /// Every node in a run derives the same group key from this.
@@ -236,22 +239,148 @@ fn entropy_below(bound: u64) -> u64 {
 // channel, run the round, report. Splitting it further would move steps behind
 // names without making the order any easier to follow, and the order is the
 // thing a reader needs.
+/// Everything a node needs before it may speak: whose keys prove authorship,
+/// its own key, the group key for this epoch, and what it should print so a
+/// human can tell it is still trusting the right card.
+struct Provisioned {
+    keyring: Vec<VerifyingKey>,
+    signing: SigningKey,
+    group: GroupKey,
+    admin: Option<String>,
+    manifest_digest: Option<[u8; 32]>,
+}
+
+/// Read the fleet and the keys, and refuse to run rather than run on less.
+///
+/// Two paths, and they are not the same kind of thing. Without `--manifest`
+/// this is the integration harness: synthetic members, every key derived from
+/// an index, a group key compiled in. With one, it is what a vessel does: a
+/// signed manifest (D27) checked against the administration key a human
+/// entered by hand (D26), a signing key that is this device's, and a group key
+/// that follows the mission epoch.
+fn provision(options: &Options) -> (Fleet, Provisioned) {
+    let Some(path) = options.manifest.as_ref() else {
+        let fleet = Fleet::uniform(options.fleet);
+        let keyring = (0..options.fleet)
+            .map(|index| SigningKey::from_seed(seed_for(index)).verifying_key())
+            .collect();
+        return (
+            fleet,
+            Provisioned {
+                keyring,
+                signing: SigningKey::from_seed(seed_for(options.index)),
+                group: GroupKey::from_bytes(GROUP_KEY),
+                admin: None,
+                manifest_digest: None,
+            },
+        );
+    };
+
+    // A manifest without a key to check it against is a file, not a policy.
+    let admin_path = options.admin_key.as_ref().unwrap_or_else(|| {
+        panic!("--manifest needs --admin-key: an unchecked manifest is not a fleet")
+    });
+    let typed = std::fs::read_to_string(admin_path)
+        .unwrap_or_else(|error| panic!("admin key {}: {error}", admin_path.display()));
+    let admin_bytes = hand::decode(&typed)
+        .unwrap_or_else(|error| panic!("admin key {}: {error}", admin_path.display()));
+    let admin = VerifyingKey::from_bytes(&admin_bytes)
+        .unwrap_or_else(|_| panic!("admin key {}: not a public key", admin_path.display()));
+
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("manifest {}: {error}", path.display()));
+    let manifest = Manifest::parse(&text)
+        .unwrap_or_else(|error| panic!("manifest {}: {error}", path.display()));
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    manifest
+        .verify(&admin, now)
+        .unwrap_or_else(|error| panic!("manifest {}: {error}", path.display()));
+
+    assert!(
+        options.index < manifest.size(),
+        "--index {} is not a member of the fleet this manifest names",
+        options.index
+    );
+
+    // This device's own key. A vessel reads it from a file that is its own; a
+    // bring-up run without one falls back to the harness derivation, and then
+    // has to match the manifest anyway, so a fixture manifest and a real one
+    // cannot be confused for each other.
+    let signing = match options.signing_key.as_ref() {
+        Some(file) => SigningKey::from_seed(read_seed(file)),
+        None => SigningKey::from_seed(seed_for(options.index)),
+    };
+    let named = manifest
+        .key_of(options.index)
+        .expect("the index was just checked against the fleet");
+    assert!(
+        signing.verifying_key() == *named,
+        "this node holds a key the manifest does not name for index {}",
+        options.index
+    );
+
+    let keyring = manifest
+        .members()
+        .iter()
+        .map(|member| *member.key())
+        .collect();
+    let group = GroupKey::fixture_for_epoch(manifest.group_key_id(), manifest.epoch());
+    (
+        Fleet::from_manifest(&manifest),
+        Provisioned {
+            keyring,
+            signing,
+            group,
+            admin: Some(hand::fingerprint(&admin_bytes)),
+            manifest_digest: Some(manifest.digest()),
+        },
+    )
+}
+
+/// Read this device's signing seed: 32 bytes of hexadecimal, in a file only
+/// its owner can read.
+fn read_seed(path: &std::path::Path) -> [u8; 32] {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("signing key {}: {error}", path.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("signing key {}: {error}", path.display()))
+            .permissions()
+            .mode();
+        // Owner-only means the low six permission bits are clear.
+        assert!(
+            mode.trailing_zeros() >= 6,
+            "signing key {}: mode {:o} lets somebody else read it; chmod 600 it",
+            path.display(),
+            mode & 0o777
+        );
+    }
+    let trimmed = text.trim();
+    assert!(
+        trimmed.len() == 64,
+        "signing key {}: 32 bytes of hexadecimal, so 64 characters",
+        path.display()
+    );
+    let mut seed = [0; 32];
+    for (index, slot) in seed.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&trimmed[index * 2..index * 2 + 2], 16)
+            .unwrap_or_else(|_| panic!("signing key {}: not hexadecimal", path.display()));
+    }
+    seed
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     let mut options = Options::from_args();
     // A manifest says who the fleet is; `--fleet` only says how many. When
     // both are given the manifest wins, because it is the one that names
     // members and what their judgment is worth (D25).
-    let assembled = match &options.manifest {
-        Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .unwrap_or_else(|error| panic!("manifest {}: {error}", path.display()));
-            let manifest = Manifest::parse(&text)
-                .unwrap_or_else(|error| panic!("manifest {}: {error}", path.display()));
-            Fleet::from_manifest(&manifest)
-        }
-        None => Fleet::uniform(options.fleet),
-    };
+    let (assembled, provisioned) = provision(&options);
     options.fleet = assembled.size();
     assert!(
         options.index < assembled.size(),
@@ -277,11 +406,17 @@ fn main() {
     let mut clock = ScaledClock::new(epoch, options.scale, options.offset);
 
     let subject = Subject::new("mission", "evt-1", 0, CONTENT_HASH, epoch).expect("valid subject");
-    let keys: Vec<SigningKey> = (0..options.fleet)
-        .map(|i| SigningKey::from_seed(seed_for(i)))
-        .collect();
-    let manifest: Vec<VerifyingKey> = keys.iter().map(SigningKey::verifying_key).collect();
-    let group = GroupKey::from_bytes(GROUP_KEY);
+    let Provisioned {
+        keyring,
+        signing,
+        group,
+        admin,
+        manifest_digest,
+    } = provisioned;
+    // The Forge adversary is a harness fiction: it needs another member's
+    // signing key, which a provisioned vessel does not have and never will.
+    let forged = (options.adversary == Adversary::Forge)
+        .then(|| SigningKey::from_seed(seed_for((options.index + 1) % options.fleet)));
     let policy = fleet().policy().clone();
 
     // Recovering the journal IS the restart path. Anything already committed is
@@ -289,14 +424,49 @@ fn main() {
     // With entropy: a journal that starts counting from zero after being
     // lost would reuse nonces (D22).
     let mut journal = LogJournal::open_with_entropy(&options.journal).expect("journal opens");
+
+    // Anti-rollback. A journal restored from an older copy rewinds the
+    // sequence counter and reuses nonces exactly as losing one does
+    // (`THREAT-MODEL.md` F1, F18). The remedy is a new epoch with a new group
+    // key, so a manifest older than the epoch this journal has already run
+    // under is refused rather than obeyed. This does not detect a restore --
+    // nothing a node stores can detect its own restoration -- it makes one
+    // that tries to reuse a spent epoch fail closed.
+    let mission_epoch = fleet().mission_epoch;
+    if let Some(seen) = journal.epoch() {
+        assert!(
+            mission_epoch >= seen,
+            "this journal has run under epoch {seen}; the manifest names {mission_epoch}. \
+             A journal is never reused under an older epoch: rotate the epoch and the \
+             group key, or start a fresh journal."
+        );
+    }
+    journal
+        .enter_epoch(mission_epoch)
+        .expect("the epoch must be durable before anything is sealed under it");
+
     let recovered_vote = journal.has_voted(&subject, &member_id(options.index));
     let mut case = Case::open(subject.clone());
+
+    // What a human reads to see the node is still trusting the card they hold
+    // (D26). Printing it is the whole mechanism: nothing here can tell that a
+    // key was substituted, only show the value so somebody can.
+    let trust = match (&admin, &manifest_digest) {
+        (Some(fingerprint), Some(digest)) => {
+            let mut hex = String::with_capacity(64);
+            for byte in digest {
+                write!(hex, "{byte:02x}").expect("a string never fails to grow");
+            }
+            format!(",\"epoch\":{mission_epoch},\"admin\":\"{fingerprint}\",\"manifest\":\"{hex}\"")
+        }
+        _ => format!(",\"epoch\":{mission_epoch},\"provisioning\":\"harness\""),
+    };
 
     report(
         &options,
         &clock,
         &format!(
-            "{{\"event\":\"start\",\"index\":{},\"radio\":\"{}\",\"phy\":\"{}\",\"recovered_vote\":{recovered_vote},\"pending\":{}}}",
+            "{{\"event\":\"start\",\"index\":{},\"radio\":\"{}\",\"phy\":\"{}\",\"recovered_vote\":{recovered_vote},\"pending\":{}{trust}}}",
             options.index,
             options.radio.name(),
             PhyProfile::eu868_sf10().name,
@@ -479,14 +649,7 @@ fn main() {
             let label = u32::try_from(journal.next_sequence())
                 .expect("a sequence past the round label: rotate the epoch before 2^32");
             round = RoundId::new(u16::try_from(options.index).unwrap_or(u16::MAX), label);
-            let bytes = build_trigger(
-                &subject,
-                &keys[options.index],
-                &group,
-                &mut journal,
-                &options,
-                round,
-            );
+            let bytes = build_trigger(&subject, &signing, &group, &mut journal, &options, round);
             if let Ok(bytes) = bytes {
                 // The anchor is when the trigger ENDS, not when it starts.
                 // Receivers learn of it only once the whole frame has arrived,
@@ -525,7 +688,7 @@ fn main() {
                 && !is_replay(&frame, &windows)
             {
                 if let Some((opened, opener, sequence)) =
-                    trigger_round(&frame, &group, &manifest, &subject)
+                    trigger_round(&frame, &group, &keyring, &subject)
                 {
                     windows[opener].mark(sequence);
                     round = opened;
@@ -537,7 +700,7 @@ fn main() {
                         "{\"event\":\"triggered\",\"by\":\"heard\"}",
                     );
                 } else if let Some(late) = late_anchor(
-                    &frame, &group, &manifest, &subject, &starts, &options, &clock,
+                    &frame, &group, &keyring, &subject, &starts, &options, &clock,
                 ) {
                     // The opening was missed -- lost on the air, or this node
                     // was not yet running -- but a vote was heard, and the
@@ -566,7 +729,7 @@ fn main() {
                     // first version closed here directly and skipped that drain,
                     // so a restarted member never counted what it had restored.
                     let learned = admit(
-                        &frame, &subject, &manifest, &group, &mut case, &clock, &options,
+                        &frame, &subject, &keyring, &group, &mut case, &clock, &options,
                     );
                     if let Some((from, _)) = learned.verified
                         && learned.refused == Some(TransitionError::WrongStageForPhase)
@@ -615,14 +778,9 @@ fn main() {
                 u16::try_from(options.index).unwrap_or(u16::MAX),
                 u32::try_from(journal.next_sequence()).unwrap_or(u32::MAX),
             );
-            if let Ok(bytes) = build_trigger(
-                &subject,
-                &keys[options.index],
-                &group,
-                &mut journal,
-                &options,
-                second,
-            ) {
+            if let Ok(bytes) =
+                build_trigger(&subject, &signing, &group, &mut journal, &options, second)
+            {
                 transmit(
                     radio.as_mut(),
                     &mut budget,
@@ -692,7 +850,7 @@ fn main() {
                     report(&options, &clock, "{\"event\":\"consultation_closed\"}");
                     for (_, held) in std::mem::take(&mut early) {
                         let learned = admit(
-                            &held, &subject, &manifest, &group, &mut case, &clock, &options,
+                            &held, &subject, &keyring, &group, &mut case, &clock, &options,
                         );
                         if let Some(from) = learned.binding_from {
                             heard.heard_from(from);
@@ -781,7 +939,8 @@ fn main() {
             match build(
                 stage,
                 &subject,
-                &keys,
+                &signing,
+                forged.as_ref(),
                 &group,
                 &mut journal,
                 &options,
@@ -832,7 +991,7 @@ fn main() {
                     if !own_admitted[index] {
                         own_admitted[index] = true;
                         let learned = admit(
-                            &bytes, &subject, &manifest, &group, &mut case, &clock, &options,
+                            &bytes, &subject, &keyring, &group, &mut case, &clock, &options,
                         );
                         if let Some(from) = learned.binding_from {
                             heard.heard_from(from);
@@ -890,7 +1049,7 @@ fn main() {
             if !missing.is_empty() {
                 match build_nack(
                     &subject,
-                    &keys[options.index],
+                    &signing,
                     &group,
                     &mut journal,
                     &options,
@@ -963,7 +1122,7 @@ fn main() {
                 continue;
             }
             if let Some((other, opener, sequence)) =
-                trigger_round(&frame, &group, &manifest, &subject)
+                trigger_round(&frame, &group, &keyring, &subject)
             {
                 windows[opener].mark(sequence);
                 if other != round {
@@ -989,7 +1148,7 @@ fn main() {
                 continue;
             }
             let learned = admit(
-                &frame, &subject, &manifest, &group, &mut case, &clock, &options,
+                &frame, &subject, &keyring, &group, &mut case, &clock, &options,
             );
             if options.adversary == Adversary::Replay && captured.is_none() {
                 captured = Some(frame.clone());
@@ -1207,7 +1366,8 @@ fn main() {
 fn build(
     stage: Stage,
     subject: &Subject,
-    keys: &[SigningKey],
+    signing: &SigningKey,
+    forged: Option<&SigningKey>,
     group: &GroupKey,
     journal: &mut LogJournal,
     options: &Options,
@@ -1239,11 +1399,7 @@ fn build(
     // Holding the group key gets a frame decrypted; only the manifest key for
     // the claimed index gets it believed. A forger has the first and not the
     // second.
-    let signing = if options.adversary == Adversary::Forge {
-        &keys[(options.index + 1) % keys.len()]
-    } else {
-        &keys[options.index]
-    };
+    let signing = forged.unwrap_or(signing);
 
     let sequence = journal
         .reserve_sequence()
@@ -1393,7 +1549,7 @@ struct LateAnchor {
 fn late_anchor(
     sealed: &[u8],
     group: &GroupKey,
-    manifest: &[VerifyingKey],
+    keyring: &[VerifyingKey],
     subject: &Subject,
     starts: &[u64; 3],
     options: &Options,
@@ -1417,8 +1573,8 @@ fn late_anchor(
     };
     let author = usize::from(envelope.author_index());
     if !same_subject(envelope, subject)
-        || author >= manifest.len()
-        || checked(frame.verify(&manifest[author], subject.content_hash())).is_err()
+        || author >= keyring.len()
+        || checked(frame.verify(&keyring[author], subject.content_hash())).is_err()
         || usize::from(header_author) != author
         || header_sequence != envelope.sequence()
         || !envelope.round().is_set()
@@ -1486,7 +1642,7 @@ fn checked<E>(outcome: Result<(), E>) -> Result<(), E> {
 fn trigger_round(
     sealed: &[u8],
     group: &GroupKey,
-    manifest: &[VerifyingKey],
+    keyring: &[VerifyingKey],
     subject: &Subject,
 ) -> Option<(RoundId, usize, u64)> {
     let (header_author, header_sequence, plain) = open_frame(group, sealed).ok()?;
@@ -1496,8 +1652,8 @@ fn trigger_round(
         return None;
     }
     let claimed = usize::from(envelope.author_index());
-    if claimed >= manifest.len()
-        || checked(frame.verify(&manifest[claimed], subject.content_hash())).is_err()
+    if claimed >= keyring.len()
+        || checked(frame.verify(&keyring[claimed], subject.content_hash())).is_err()
     {
         return None;
     }
@@ -1516,7 +1672,7 @@ fn trigger_round(
 fn admit(
     sealed: &[u8],
     subject: &Subject,
-    manifest: &[VerifyingKey],
+    keyring: &[VerifyingKey],
     group: &GroupKey,
     case: &mut Case,
     clock: &impl Clock,
@@ -1545,8 +1701,8 @@ fn admit(
         report(options, clock, "{\"event\":\"refused\",\"why\":\"header\"}");
         return learned;
     }
-    if claimed >= manifest.len()
-        || checked(received.verify(&manifest[claimed], subject.content_hash())).is_err()
+    if claimed >= keyring.len()
+        || checked(received.verify(&keyring[claimed], subject.content_hash())).is_err()
     {
         report(
             options,
@@ -1890,6 +2046,13 @@ struct Options {
     journal: PathBuf,
     /// A fleet manifest to read the members from, instead of `--fleet`.
     manifest: Option<PathBuf>,
+    /// The administration key this vessel was given by hand, as the crew
+    /// typed it (D26). Required with `--manifest`: a manifest nothing checks
+    /// is a file, not a fleet.
+    admin_key: Option<PathBuf>,
+    /// This device's own signing seed. Without it a manifest run falls back to
+    /// the harness derivation, which the manifest still has to name.
+    signing_key: Option<PathBuf>,
     scale: u32,
     offset: i64,
     /// The instant this run's clock counts from, in seconds. Nothing to do
@@ -1922,6 +2085,8 @@ impl Options {
             hub: value("--hub").unwrap_or_else(|| "127.0.0.1:9000".to_string()),
             journal: value("--journal").map_or_else(|| PathBuf::from("node.log"), PathBuf::from),
             manifest: value("--manifest").map(PathBuf::from),
+            admin_key: value("--admin-key").map(PathBuf::from),
+            signing_key: value("--signing-key").map(PathBuf::from),
             scale: value("--scale").and_then(|v| v.parse().ok()).unwrap_or(100),
             offset: value("--offset").and_then(|v| v.parse().ok()).unwrap_or(0),
             clock_epoch: value("--clock-epoch")

@@ -9,12 +9,44 @@
 #
 # The ratio cap is 3:1, so scoring every member into 34..100 keeps any
 # manifest lawful however the members are scored one by one.
+#
+# INSECURE FIXTURE. This example is signed by the all-sevens administration
+# key and its members hold the harness keys the binary derives from an index,
+# so anybody can forge it. It shows the shape of a manifest; it is not a
+# trust artefact. A real fleet's administrator issues a real key (D26) and
+# hands its public half to each vessel on a card:
+#
+#   lcq-manifest fingerprint --key admin.key
+#   lcq-manifest sign --key admin.key --in fleet.manifest --out fleet.signed
+#   lcq-manifest verify --admin-key admin.pub --in fleet.signed
 
-version 1
+version 2
 epoch 1
+
+# The window this fleet is good for. Half open: it is valid from the first
+# instant and not from the one it names, so the next manifest starts where
+# this one stops with no gap and no overlap.
+valid-from 1750000000
+valid-until 1900000000
+
+# The name of the group key, never the key. What this identifies arrives
+# through provisioning.
+group-key 0000000000000000000000000000000000000000000000000000000000000001
+
+# What a quorum means, signed along with everything else.
+byzantine-bps 4000
+max-competence-ratio 3
+
+# The channel this fleet flies and the protocol limits it was built against.
+# A node that does not fly this profile cannot hear this fleet, so it refuses
+# rather than transmitting into a channel nobody is listening on.
+phy-profile eu868-sf10-v1
+heard-capacity 64
 
 # These three come from the worked example in HANDOFF.md: parameter counts
 # of 8 B, 3 B and 0.5 B, square-rooted and mapped onto 34..100.
-member 0 100 ship-alpha
-member 1 66 ship-bravo
-member 2 34 ship-charlie
+member 0 100 b1703fe3cfd4db24d0f79466875b8cc83c03d05ff4c9827bc14c44f7df332283 ship-alpha
+member 1 66 e6e8980780272645073c91030e28afaa52bc67b4dbbe4fbd8b70388214185c35 ship-bravo
+member 2 34 06293eb548e9aaf516b202623b64eaa886b8242afbf36f47045bbcf1df07b793 ship-charlie
+issuer QH2R-E7QV-7785-31NK
+signature f4c4790efa6ff541f3a50270b3fca12e375fdec4a68bbd16ca2ea8fae19e25b9c730500d38747ef59485b019278ef25795d499693f531cd247d2cfd5f115a005

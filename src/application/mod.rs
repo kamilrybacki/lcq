@@ -13,7 +13,7 @@ mod replay;
 
 pub use budget::{AirtimeBudget, DUTY_CYCLE_BUDGET_MS, DUTY_CYCLE_WINDOW_MS, duty_cycle_ok};
 pub use journal::{Journal, JournalError, JournalSnapshot, OutgoingFrame};
-pub use manifest::{MANIFEST_VERSION, Manifest, ManifestError, Member};
+pub use manifest::{MANIFEST_VERSION, MAX_LABEL_BYTES, Manifest, ManifestError, Member};
 pub use queue::{Priority, QueueError, RadioQueue};
 pub use radio::{PhyProfile, Radio, RadioError, RadioEvent, Received};
 pub use replay::{REPLAY_WINDOW, ReplayWindow};

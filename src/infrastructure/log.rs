@@ -70,6 +70,11 @@ enum Entry {
     },
     /// The highest sequence number handed out so far, plus one.
     Sequence { next: u64 },
+    /// The mission epoch this journal is running under.
+    ///
+    /// Monotonic on replay, like the sequence: a record claiming an older
+    /// epoch cannot lower what the journal has already seen.
+    Epoch { epoch: u16 },
     /// A frame that no longer needs sending: acknowledged, or expired.
     Retired { sequence: u64 },
     /// A binding vote admitted from another member, kept as the frame it
@@ -119,6 +124,7 @@ impl From<io::Error> for OpenError {
 /// The live state a log replays into.
 #[derive(Debug, Default)]
 struct State {
+    epoch: Option<u16>,
     locks: BTreeSet<String>,
     pending: BTreeMap<u64, OutgoingFrame>,
     next_sequence: u64,
@@ -148,6 +154,9 @@ impl State {
             // The counter only ever moves forward, whatever order records
             // arrive in, so a replayed log can never rewind it.
             Entry::Sequence { next } => self.next_sequence = self.next_sequence.max(next),
+            Entry::Epoch { epoch } => {
+                self.epoch = Some(self.epoch.map_or(epoch, |held| held.max(epoch)));
+            }
             Entry::Retired { sequence } => {
                 self.pending.remove(&sequence);
             }
@@ -298,6 +307,12 @@ impl LogJournal {
         entries.push(Entry::Sequence {
             next: self.state.next_sequence,
         });
+        // Compaction rewrites the file from the live state, so anything it
+        // forgets is gone. An epoch it forgot would look like a journal that
+        // had never run, which is exactly what a rollback wants to look like.
+        if let Some(epoch) = self.state.epoch {
+            entries.push(Entry::Epoch { epoch });
+        }
         for key in &self.state.locks {
             entries.push(Entry::Lock { key: key.clone() });
         }
@@ -474,8 +489,25 @@ impl Journal for LogJournal {
             .map(|(author, frame)| (author.as_str(), frame.as_slice()))
     }
 
+    fn epoch(&self) -> Option<u16> {
+        self.state.epoch
+    }
+
+    fn enter_epoch(&mut self, epoch: u16) -> Result<(), JournalError> {
+        // Nothing to write if this journal has already seen this epoch or a
+        // later one: the record is monotonic, so re-entering is a no-op rather
+        // than a way to rewind.
+        if self.state.epoch.is_some_and(|held| held >= epoch) {
+            return Ok(());
+        }
+        self.append(&Entry::Epoch { epoch })?;
+        self.state.epoch = Some(epoch);
+        Ok(())
+    }
+
     fn snapshot(&self) -> JournalSnapshot {
         JournalSnapshot {
+            epoch: self.state.epoch,
             vote_locks: self.state.locks.iter().map(|k| (k.clone(), 0)).collect(),
             pending: self.state.pending.values().cloned().collect(),
             next_sequence: self.state.next_sequence,

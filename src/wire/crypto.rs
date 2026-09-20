@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use blake2::{Blake2s256, Digest};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 
@@ -66,6 +67,25 @@ impl SigningKey {
 pub struct VerifyingKey(ed25519_dalek::VerifyingKey);
 
 impl VerifyingKey {
+    /// Read a public key from the 32 bytes a manifest carries.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError::BadSignature`] if the bytes are not a point on the curve.
+    /// A manifest naming a key that cannot exist is a manifest to refuse, and
+    /// it is refused here rather than at the first frame that fails to verify.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, WireError> {
+        ed25519_dalek::VerifyingKey::from_bytes(bytes)
+            .map(Self)
+            .map_err(|_| WireError::BadSignature)
+    }
+
+    /// The 32 bytes, for a manifest to carry and a canonical form to sign.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
     /// Check a signature over `message`.
     ///
     /// # Errors
@@ -90,6 +110,28 @@ impl GroupKey {
     #[must_use]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Derive a key from the name a manifest gives it and the mission epoch.
+    ///
+    /// **An insecure fixture.** A real group key is a secret that arrives
+    /// through provisioning; a manifest carries only its opaque name, because
+    /// a manifest goes wherever the fleet goes. Deriving one from a public
+    /// name means anybody holding the manifest can compute it, which is no
+    /// secret at all.
+    ///
+    /// It exists for one property the harness needs before provisioning does:
+    /// **a new epoch is a new key**. That is what makes an epoch rotation a
+    /// real remedy for a lost or rolled-back journal (`THREAT-MODEL.md` F1 and
+    /// F18) rather than a number that changes while the keystream does not.
+    /// Every test and every bring-up run uses this; no vessel may.
+    #[must_use]
+    pub fn fixture_for_epoch(group_key_id: &[u8; 32], epoch: u16) -> Self {
+        let mut hash = Blake2s256::new();
+        hash.update(b"lcq-group-key-fixture-v1");
+        hash.update(group_key_id);
+        hash.update(epoch.to_be_bytes());
+        Self(hash.finalize().into())
     }
 }
 
