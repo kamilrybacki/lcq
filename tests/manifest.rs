@@ -619,3 +619,72 @@ fn the_manifest_the_documents_ship_is_the_one_this_build_reads() {
     );
     manifest.policy().expect("and be a lawful fleet");
 }
+
+#[test]
+fn how_a_file_was_written_cannot_change_what_it_says() {
+    // The canonical form is built after parsing, so nothing about the file's
+    // typography may reach the signature. This is the class of gap worth
+    // hunting: two files that a person would call the same manifest must sign
+    // to the same bytes, and two that differ in substance must not.
+    let plain = signed(&three());
+    let reference = Manifest::parse(&plain).expect("a signed manifest");
+
+    for (what, rewritten) in [
+        ("carriage returns", plain.replace('\n', "\r\n")),
+        ("no trailing newline", plain.trim_end().to_string()),
+        ("blank lines throughout", plain.replace('\n', "\n\n")),
+        ("leading blank lines", format!("\n\n{plain}")),
+        ("trailing spaces", plain.replace('\n', "   \n")),
+        (
+            "tabs for spaces",
+            plain.replace("member 0 100", "member\t0\t100"),
+        ),
+        (
+            "a comment on every line",
+            plain
+                .lines()
+                .map(|line| format!("{line} # written by hand\n"))
+                .collect(),
+        ),
+    ] {
+        let other = Manifest::parse(&rewritten)
+            .unwrap_or_else(|error| panic!("{what} stopped it parsing: {error}"));
+        assert_eq!(
+            other.canonical_bytes(),
+            reference.canonical_bytes(),
+            "{what} changed what the manifest says"
+        );
+        assert_eq!(
+            other.digest(),
+            reference.digest(),
+            "{what} changed its identity"
+        );
+        other
+            .verify(&admin().verifying_key(), NOW)
+            .unwrap_or_else(|error| panic!("{what} broke the signature: {error}"));
+    }
+}
+
+#[test]
+fn a_second_signature_line_is_not_a_second_chance() {
+    // Appending is the cheapest attack on a line-oriented format: leave the
+    // real manifest alone and add a line that a sloppy parser reads last.
+    let plain = signed(&three());
+    let forged = Manifest::sign_text(&three().replace("epoch 7", "epoch 8"), &impostor())
+        .expect("the impostor signs their own");
+    let appended = format!(
+        "{plain}{}\n",
+        forged
+            .lines()
+            .find(|line| line.starts_with("signature "))
+            .expect("a signature line")
+    );
+    assert_eq!(
+        Manifest::parse(&appended),
+        Err(ManifestError::OutOfOrder {
+            line: 15,
+            directive: "signature"
+        }),
+        "a manifest with two signatures is not a manifest"
+    );
+}
