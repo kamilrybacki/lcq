@@ -122,6 +122,44 @@ Both reviews land on the same order.
    after. The member's ID stays an operator label: the principal is the index
    and the public key. Today's binary is an integration harness, and must be
    called one.
+
+   **The canonical form, pinned now.** Review's rules, recorded here so that
+   version 2 starts from them instead of deriving them again:
+
+   - **Sign bytes built after parsing, not normalised text.** The signature
+     covers a canonical byte form constructed once the directives have been
+     read, never "the file after the parser tidied it".
+   - **Version.** `version 2` is a new signed schema. A version 1 parser fails
+     closed on a version 2 file and the reverse, rather than reading what it
+     recognises.
+   - **Record order.** Version, epoch, validity, policy fields, group-key id,
+     then member records ascending by numeric index, then issuer and signature
+     metadata last.
+   - **Numbers.** Decimal ASCII only. No sign, no leading zeroes except the
+     literal `0`, explicit bounds on every field.
+   - **Text.** Restricted ASCII for operational identifiers, `LF` newlines.
+     Comments and whitespace are not signed.
+   - **Member identity.** The index and a fixed-length 32-byte Ed25519 public
+     key are the cryptographic identity. The `id` is an operator label with a
+     fixed character set and a maximum length.
+   - **Public-key encoding.** Exactly 32 bytes in a machine encoding with one
+     spelling per value, such as hex or base64url. **Not** `wire::hand`: that
+     reads `I` as `1` and `O` as `0` deliberately, so several strings decode to
+     the same bytes, which a canonical form cannot allow. Hand entry is for
+     the one key a person types (D26) and nothing else.
+   - **What the signature covers.** Competence, the Byzantine budget, the
+     competence concentration cap, the `Heard` capacity and protocol limits,
+     the PHY profile identity, the group-key id, the epoch and the validity
+     interval.
+   - **Rollback.** An epoch needs an anti-rollback rule and not merely an
+     integer comparison.
+   - **The issuer.** The administration public key is pinned separately, by
+     hand. Any issuer fingerprint the manifest carries is an operator
+     diagnostic and never the trust decision.
+   - **The group secret is not in the manifest.** Only an opaque
+     `group_key_id`. The key itself arrives through separate provisioning.
+   - **Duplicates fail first.** A duplicate directive, index, public key or
+     `id` is refused before canonicalization, not resolved by last-wins.
 2. **Rollback and loss (F1, F18)** — a journal that is missing, replaced or
    older than the last one seen is a new epoch with a new group key, or the
    node does not start. Monotonic storage the host cannot rewind is the

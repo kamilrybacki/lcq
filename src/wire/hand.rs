@@ -17,22 +17,46 @@
 //! 8VQ4-3JX0- ... -Z9T2    56 symbols: 52 of key, 4 of check
 //! ```
 //!
-//! # What the check symbols are worth
+//! # What the check symbols are worth, stated precisely
 //!
 //! They are the first twenty bits of the key's `BLAKE2s` digest, so a mistyped
-//! key is refused with probability `1 - 2^-20`. The tests go further and check
-//! that exhaustively for the mistakes a person actually makes: every
-//! single-symbol substitution at every position, every transposition of
-//! neighbouring symbols, and every swap of neighbouring groups. None of them
-//! get through.
+//! key is refused with probability `1 - 2^-20`. That is a probability and not
+//! a guarantee: unlike a deterministic check digit, nothing here *proves* that
+//! every single mistype is caught.
+//!
+//! The tests are exhaustive over the error space and not over the key space,
+//! which is worth saying both halves of. For every key they cover, they try
+//! every single-symbol substitution at every position, every transposition of
+//! neighbouring symbols and every swap of neighbouring groups, and none get
+//! through. They cover a fixed set of deterministic keys, so that is a
+//! regression suite rather than an algebraic guarantee.
+//!
+//! Crockford's own modulo-37 check symbol would give that guarantee for
+//! single substitutions and neighbouring transpositions, and `DECISIONS.md`
+//! D26 records why this does not use it: its check alphabet pulls in `U` and
+//! `*~$=`, which is exactly what a key read aloud over VHF cannot afford.
+//!
+//! # This encoding is for one key, and not for keys in a manifest
+//!
+//! Reading `I` as `1` and `O` as `0` is what makes this survive a human, and
+//! it means several different strings decode to the same bytes. Inside a body
+//! that gets signed, that is disqualifying: a canonical form needs exactly one
+//! representation per value. So this is the encoding for the single key a
+//! person types at commissioning, and never for the member keys a signed
+//! manifest carries, which use a machine encoding with one spelling each.
 //!
 //! # What none of this defends against
 //!
 //! Typing a key by hand says a human asserted it once. It does not keep the
 //! file it lands in safe afterwards: whoever can rewrite a vessel's manifest
 //! can usually rewrite whatever holds the key beside it (`THREAT-MODEL.md`
-//! F21). What works is that the node prints this encoding back at every start,
-//! so somebody holding the administrator's card can see that it changed.
+//! F21). The node printing this encoding back at every start makes a
+//! substitution *detectable*, but only while three things hold: the
+//! administrator's card is trusted independently, somebody actually compares
+//! against it at every start, and the value on screen came from an unmodified
+//! binary. An attacker who can rewrite the key file can usually rewrite the
+//! program that prints it, and on an unattended vessel nobody is comparing, so
+//! there this buys nothing at all.
 
 use alloc::string::String;
 use core::fmt;

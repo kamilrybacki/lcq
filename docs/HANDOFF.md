@@ -539,17 +539,32 @@ rather than at the first manifest it cannot verify.
 
 The tests enumerate the mistakes rather than trusting the probability: every
 single-symbol substitution at every position, every transposition of
-neighbouring symbols, every swap of neighbouring groups. That found a real
-one. Fifty-two symbols hold 260 bits and a key holds 256, so the last symbol
+neighbouring symbols, every swap of neighbouring groups. Exhaustive over the
+error space, not over the key space -- a regression suite across a fixed set
+of deterministic keys, not an algebraic guarantee, which is the qualification
+review asked for. Crockford's modulo-37 check digit would give that guarantee
+for two of those three classes and was rejected for its alphabet: it pulls in
+`U` and `*~$=`, which a key read aloud over VHF cannot carry.
+
+That enumeration found a real one. Fifty-two symbols hold 260 bits and a key holds 256, so the last symbol
 carries one bit of key and four of padding; the first draft rejected only one
 of those four, which let sixteen strings decode to the same key.
 
 Say the limit out loud, because it is easy to oversell. Pinning a key does
 not stop the F21 attacker -- whoever can rewrite a manifest can usually
 rewrite whatever holds the key beside it. It makes the substitution
-*detectable*, and only if the node prints the key back at every start and
-somebody compares it against the administrator's card. Manifest version 2 is
-still to build.
+*detectable*, and only while three things hold: the administrator's card is
+trusted independently, a human compares against it at every start, and the
+printed value comes from an unmodified binary. That last one is the attacker's
+to break, so this is manual tamper-evidence rather than a security control,
+and an unattended vessel gets nothing from it.
+
+One constraint that belongs to the module and not to version 2: `wire::hand`
+reads `I` as `1` and `O` as `0`, so several strings decode to the same bytes.
+That is right for a human and disqualifying inside a signed body, so member
+public keys use a machine encoding with one spelling per value. The canonical
+rules for version 2 are now pinned in `docs/THREAT-MODEL.md` under the first
+next step, rather than left to be derived again.
 
 ### What to pick up next
 

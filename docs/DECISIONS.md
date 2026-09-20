@@ -1518,10 +1518,28 @@ of four.
 **The check symbols are twenty bits of the key's `BLAKE2s` digest.** A mistyped
 key is refused with probability `1 - 2^-20`, and refused outright: a key that
 is nearly right is not a key, so it fails at entry rather than at the first
-manifest it cannot verify. The tests do not settle for the probability. They
-enumerate the mistakes a person actually makes -- every single-symbol
-substitution at every position, every transposition of neighbouring symbols,
-every swap of neighbouring groups -- and none get through.
+manifest it cannot verify. The tests enumerate the mistakes a person actually
+makes -- every single-symbol substitution at every position, every
+transposition of neighbouring symbols, every swap of neighbouring groups --
+and none get through.
+
+**Say which half of that is exhaustive.** Review was right that the first
+draft of this record overclaimed. The tests cover the error space exhaustively
+and the key space not at all: for every key they try, they try every mistake
+of those three kinds, and they try a fixed set of deterministic keys. That is
+a regression suite, not an algebraic guarantee, and twenty bits of digest are
+a probability rather than a proof.
+
+**Why not Crockford's own check symbol, which would be a proof.** A modulo-37
+check digit detects *every* single substitution and *every* neighbouring
+transposition, which is more than a digest promises. It was rejected because
+of its alphabet: Crockford extends the symbol set with `U` and `*~$=` for the
+check digit, and a key that has to be read aloud over VHF cannot afford an
+asterisk, a tilde or the letter this alphabet deliberately removed. Twenty
+bits that cover every kind of error beat five that cover two kinds and cost
+the property the encoding exists for. A deterministic digit could be added
+beside the digest later, at one more character; that is a change to an unused
+module and costs the same whenever it is made.
 
 **The whole key, not a fingerprint of it.** A shorter string would have to pin
 a key carried somewhere else, and both end up in the same file anyway, so the
@@ -1536,8 +1554,24 @@ Whoever can rewrite a vessel's manifest can usually rewrite whatever holds the
 key beside it, so pinning does not stop the F21 attacker -- it makes the
 substitution *detectable*. That is the mechanism, not a nice-to-have: the node
 prints the key back at every start, so somebody holding the administrator's
-card can see that it changed. A deployment that never reads that line gets no
-benefit from any of this.
+card can see that it changed.
+
+**And "detectable" holds only under three conditions**, which review was right
+to make explicit rather than leave as reading between the lines. The
+administrator's card has to be trusted independently of the vessel. A human
+has to actually compare against it, at every start and not only the first. And
+the value on screen has to come from an unmodified binary -- an attacker who
+can rewrite the key file can usually also rewrite the program that prints it,
+or the service wrapper, or the log. This is manual tamper-evidence, not a
+security control. On an unattended vessel, where nobody is comparing anything,
+it buys nothing at all.
+
+**The encoding is for this one key and not for the keys inside a manifest.**
+Reading `I` as `1` and `O` as `0` is what lets a key survive a human, and it
+means several strings decode to the same bytes. That is disqualifying inside a
+signed body, where a canonical form needs exactly one representation per
+value. Member public keys in manifest version 2 therefore use a machine
+encoding with one spelling each, and `wire::hand` stays where a person types.
 
 **Writing the first canonical bit of the padding was a real bug.** Fifty-two
 symbols hold 260 bits and a key holds 256, so the last symbol carries one bit

@@ -121,9 +121,17 @@ public half to each vessel out of band for somebody aboard to type in (D26).
 `wire::hand` is the encoding that survives that trip: Crockford's base32,
 without the letters that get confused for digits when a key is read aloud,
 in fourteen groups of four with four check symbols. A mistyped key is refused
-when it is entered, not at the first manifest it cannot verify. Pinning a key
-this way does not stop somebody who can already write the vessel's files; it
-makes a substituted key visible to whoever holds the administrator's card.
+when it is entered, not at the first manifest it cannot verify, with
+probability `1 - 2^-20` rather than a guarantee.
+
+Pinning a key this way does not stop somebody who can already write the
+vessel's files. It makes a substituted key visible to whoever holds the
+administrator's card, and only while the card is trusted independently, a
+human compares against it at every start, and the value on screen comes from
+an unmodified binary. It is manual tamper-evidence rather than a security
+control, and on an unattended vessel it is worth nothing. The encoding is for
+that one hand-typed key: the member keys a signed manifest carries need one
+spelling per value, which reading `I` as `1` rules out.
 
 ## Running a fleet
 
