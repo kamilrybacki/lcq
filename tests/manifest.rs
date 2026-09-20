@@ -202,6 +202,31 @@ fn a_fleet_larger_than_a_frame_can_acknowledge_is_refused() {
 }
 
 #[test]
+fn the_manifest_the_documents_ship_is_a_fleet() {
+    // `docs/three-vessels.manifest` is what an operator copies on the first
+    // day with hardware. A documented example that does not parse is worse
+    // than none, so it is read from disk here rather than duplicated.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/three-vessels.manifest");
+    let text = std::fs::read_to_string(path).expect("the example manifest is in the repository");
+    let manifest = Manifest::parse(&text).expect("the example manifest parses");
+    assert_eq!(manifest.size(), 3);
+    let policy = manifest.policy().expect("a lawful policy");
+    assert_eq!(policy.min_signers(), 3, "a fleet of three needs all three");
+    // The worked recipe in HANDOFF.md maps onto the band the 3:1 cap
+    // implies; if the example drifts off it, the recipe is wrong or the file
+    // is.
+    let (floor, ceiling) = Competence::band(policy.max_competence_ratio());
+    for member in manifest.members() {
+        assert!(
+            (floor..=ceiling).contains(&member.competence()),
+            "{} scored {} outside the band {floor}..={ceiling}",
+            member.id(),
+            member.competence()
+        );
+    }
+}
+
+#[test]
 fn the_error_explains_itself_to_an_operator() {
     let text = "version 1\nepoch 1\nmember 0 100 a\nmember 2 100 c\n";
     let said = Manifest::parse(text).unwrap_err().to_string();
