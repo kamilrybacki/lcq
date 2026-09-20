@@ -10,7 +10,19 @@ modem firmware's medium-access scheme (D23 says why that matters).
 The protocol is specified in `src/infrastructure/sx126x/bridge.rs`, and the
 reference device in that module -- the same protocol on the virtual chip --
 is what this firmware must match byte for byte. The tests run against the
-reference device; the boards run against this.
+reference device; the boards run against this. Three places have to agree
+and only two of them are tested, so after any change to the protocol, read
+this sketch against the table in that module's documentation.
+
+Two rules the protocol depends on and this firmware must keep (D23):
+
+- **A DIO1 notice carries the level as the device reads it *after* the
+  edge**, and the latch is cleared *before* the line is read, never after.
+  The host treats a notice as a hint and confirms by reading the line; a
+  notice that says the line has fallen is dropped.
+- **The session id is drawn once at boot and never changes.** A host that
+  sees it change knows the board restarted under it and stops using the
+  radio rather than transmitting into a chip nothing configured.
 
 ## Layout
 
@@ -64,13 +76,24 @@ The separate images are there too: `bridge.ino.bootloader.bin` at `0x0`,
 
 ## First contact
 
+Not with a node. `lcq-bridge` asks the board what it is, one rung at a time,
+so that a board which will not come up is one identifiable fault instead of
+five possible ones:
+
+```sh
+lcq-bridge --port /dev/ttyACM0            # the bridge alone
+lcq-bridge --port /dev/ttyACM0 --radio    # and then the chip under the driver
+```
+
+Then a node:
+
 ```sh
 lcq-node --index 1 --fleet 3 --slots --journal ship1.log --radio bridge:/dev/ttyACM0
 ```
 
-The node logs `bridge_up` with the firmware version and the board id, then
-`chip_up` once the driver has brought the SX1262 into receive mode. Anything
-else is in `docs/HARDWARE-BRINGUP.md`.
+The node logs `bridge_up` with the protocol version, the firmware version,
+the board id and the session, then `chip_up` once the driver has brought the
+SX1262 into receive mode. Anything else is in `docs/HARDWARE-BRINGUP.md`.
 
 ## Serial port notes
 

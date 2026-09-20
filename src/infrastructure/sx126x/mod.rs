@@ -35,4 +35,17 @@ pub use hardware::{HardwareError, HardwareRadio, LinuxWatch};
 #[cfg(feature = "hardware")]
 pub use linux::{LinuxIv, LinuxSpi, LinuxSpiError, Pins, SPI_SPEED_HZ};
 pub use lora_phy::sx126x::TcxoCtrlVoltage;
+
+/// The chip's nearest TCXO control voltage to the one a module supplies.
+#[must_use]
+pub const fn tcxo_control(millivolts: u32) -> TcxoCtrlVoltage {
+    match millivolts {
+        ..1_700 => TcxoCtrlVoltage::Ctrl1V6,
+        1_700..1_900 => TcxoCtrlVoltage::Ctrl1V8,
+        1_900..2_500 => TcxoCtrlVoltage::Ctrl2V2,
+        2_500..2_900 => TcxoCtrlVoltage::Ctrl2V7,
+        2_900..3_200 => TcxoCtrlVoltage::Ctrl3V0,
+        _ => TcxoCtrlVoltage::Ctrl3V3,
+    }
+}
 pub use radio::{DriverHandle, StartError, Sx126xRadio, Watch};

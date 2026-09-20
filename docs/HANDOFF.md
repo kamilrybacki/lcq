@@ -393,6 +393,46 @@ alone in 46 s), and the vote-lock test in CI on a firmware-only commit -- so
 CI now runs that suite one test at a time; it is timing-sensitive by nature,
 five fleets of real processes at once. Tuesday is `HARDWARE-BRINGUP.md`.
 
+### What the review of the bridge changed (D23, amended)
+
+Hermes reviewed `61402ea` and `fd930f0` statically and called D23 the right
+road, with two High findings, both about the gap between what the cable says
+and what the chip is doing. Fixed before the boards arrive:
+
+- A DIO1 notice is a hint, never a fact. The firmware sends the level it
+  read after the edge; the host drops a notice saying the line has fallen
+  and confirms every other one by reading the line. Left alone, a late
+  notice would wake the driver into the path that clears the IRQ status and
+  discard a reception with no log line -- something the virtual chip cannot
+  show, because its IRQ view is exact.
+- `HELLO` answers with a session id drawn at every boot (protocol version
+  2). A call that goes unanswered asks again; a changed id poisons the link,
+  every later call fails and the radio reports `bridge_reset`. No automatic
+  recovery, so a node that missed a round says so.
+- The IRQ deadline comes from the profile (time on air of a 255-byte frame
+  plus a second) instead of a flat twelve seconds; `await_irq` is reached
+  only from `tx()`, so it is a `TxDone` bound.
+- The error event names its command, and the host ignores one about
+  something else. `handle_hello` and `handle_events` clear the latch before
+  reading the line.
+- New: `lcq-bridge`, the pre-flight. Nine rungs -- `HELLO`, reset, BUSY,
+  `GetStatus`, `GetDeviceErrors`, `GetIrqStatus`, DIO1, the antenna switch,
+  twenty round trips for a median and a p95 -- and it names the lowest one
+  that failed. It runs against the reference device in the suite, so the
+  tool is qualified before the boards are.
+- `HARDWARE-BRINGUP.md` gained: what to record about each board before
+  touching it (serial, revisions, artifact digest, run URL, host commit),
+  the pre-flight as its own step with a failure-to-cause table, conducted
+  attenuation numbers rather than "two metres", a serial-reset note, six
+  deliberate failures to provoke, and a measurement table that asks for
+  median, p95 and maximum, including current draw as the quickest test of
+  DC-DC against LDO.
+
+Still open from the review, and only a board can answer: whether the
+Wio-SX1262 carries the DC-DC inductor (the schematic was not conclusive, so
+day one tries both), and whether RXEN high in receive is right (measure
+sensitivity both ways, do not infer it from one successful packet).
+
 ### What to pick up next
 
 1. **Provisioning and key lifecycle** (THREAT-MODEL F4, F5, F18) — before any

@@ -465,7 +465,7 @@ where
     }
 }
 
-fn spreading_factor(value: u8) -> Option<SpreadingFactor> {
+pub(super) fn spreading_factor(value: u8) -> Option<SpreadingFactor> {
     Some(match value {
         5 => SpreadingFactor::_5,
         6 => SpreadingFactor::_6,
@@ -479,7 +479,7 @@ fn spreading_factor(value: u8) -> Option<SpreadingFactor> {
     })
 }
 
-fn bandwidth(hz: u32) -> Option<Bandwidth> {
+pub(super) fn bandwidth(hz: u32) -> Option<Bandwidth> {
     Some(match hz {
         7_800 => Bandwidth::_7KHz,
         10_400 => Bandwidth::_10KHz,
@@ -495,7 +495,7 @@ fn bandwidth(hz: u32) -> Option<Bandwidth> {
     })
 }
 
-fn coding_rate(denominator: u8) -> Option<CodingRate> {
+pub(super) fn coding_rate(denominator: u8) -> Option<CodingRate> {
     Some(match denominator {
         5 => CodingRate::_4_5,
         6 => CodingRate::_4_6,

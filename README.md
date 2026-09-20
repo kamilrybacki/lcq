@@ -100,8 +100,10 @@ device so the unmodified `lora-phy` driver on the host drives the chip
 directly. `docs/HARDWARE-BRINGUP.md` is the first day with them.
 
 ```sh
-# The bridge firmware on USB serial (a 1.8 V TCXO and the DC-DC converter
-# are the kit's defaults; `,tcxo=none` and `,ldo` say otherwise):
+# First, what is on the other end of the cable, one rung at a time:
+lcq-bridge --port /dev/ttyACM0 --radio
+# Then a node. A 1.8 V TCXO and the DC-DC converter are the kit's defaults;
+# `,tcxo=none` and `,ldo` say otherwise:
 lcq-node --index 1 --fleet 3 --slots --journal ship1.log --radio bridge:/dev/ttyACM0
 # An RNode (Heltec, LilyGO, RAK boards with RNode firmware) on USB serial:
 lcq-node --index 1 --fleet 5 --slots --journal ship1.log --radio rnode:/dev/ttyACM0

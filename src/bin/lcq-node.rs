@@ -35,7 +35,7 @@ use lcq::domain::state::{Case, TransitionError};
 use lcq::domain::time::{Clock, Timestamp};
 use lcq::infrastructure::rnode::RNodeRadio;
 use lcq::infrastructure::sx126x::{
-    BridgeOptions, BridgeRadio, HardwareRadio, Pins, Sx126xRadio, TcxoCtrlVoltage,
+    BridgeOptions, BridgeRadio, HardwareRadio, Pins, Sx126xRadio, tcxo_control,
 };
 use lcq::infrastructure::{HubRadio, LogJournal, ScaledClock};
 use lcq::sim::airtime_ms;
@@ -1685,18 +1685,6 @@ fn millivolts(volts: &str) -> u32 {
         .parse()
         .unwrap_or_else(|_| panic!("tcxo voltage {volts:?} is not a number"));
     (volts.clamp(0.0, 5.0) * 1_000.0).round() as u32
-}
-
-/// The chip's nearest TCXO control voltage.
-fn tcxo_control(millivolts: u32) -> TcxoCtrlVoltage {
-    match millivolts {
-        ..1_700 => TcxoCtrlVoltage::Ctrl1V6,
-        1_700..1_900 => TcxoCtrlVoltage::Ctrl1V8,
-        1_900..2_500 => TcxoCtrlVoltage::Ctrl2V2,
-        2_500..2_900 => TcxoCtrlVoltage::Ctrl2V7,
-        2_900..3_200 => TcxoCtrlVoltage::Ctrl3V0,
-        _ => TcxoCtrlVoltage::Ctrl3V3,
-    }
 }
 
 /// Attach the radio the options ask for.

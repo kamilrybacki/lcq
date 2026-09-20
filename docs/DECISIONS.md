@@ -1332,3 +1332,37 @@ to its own repository with the host crate, since neither side knows LCQ.
 Not decided: whether a vessel node is a host plus a bridge, or the protocol
 on the microcontroller itself. The bridge answers the qualification question
 either way.
+
+**Amended 2026-09-20, after review.** Three rules the first draft did not
+have, all of them about the gap between what the cable says and what the
+chip is doing.
+
+- **A DIO1 notice is a hint; the line is the fact.** The firmware sends the
+  level it read after the edge, the host drops a notice that says the line
+  has fallen, and every wait confirms by reading the line before it wakes the
+  driver. Without this a notice that crosses the cable after the driver has
+  cleared the IRQ wakes the driver into the path that clears the status
+  again, which would discard a reception that arrived in between -- a lost
+  frame with no log line. The virtual chip cannot show this because its IRQ
+  view is exact and its waits are not carried by a cable.
+- **The device names its session, and a change poisons the link.** `HELLO`
+  answers with an identifier drawn at every boot (protocol version 2). A host
+  that stops getting replies asks again; a different identifier means the
+  microcontroller restarted and the chip is no longer the one the driver
+  configured, so every later call fails and the radio reports
+  `bridge_reset`. It does not re-initialise itself: a node that silently
+  recovers hides that it missed a round, which is the one thing hardware
+  qualification must not hide.
+- **The IRQ deadline comes from the profile.** The only place the driver
+  waits on the line is `tx()`, for `TxDone`, so the bound is the time on air
+  of the longest frame the profile can carry plus a second for the bridge.
+  A fixed twelve seconds was either too slow to notice a dead board or,
+  for a slower profile, too short.
+
+Also from the review: the pre-flight is a tool, not a paragraph in a runbook.
+`lcq-bridge` walks the rungs -- `HELLO`, reset, BUSY, `GetStatus`,
+`GetDeviceErrors`, `GetIrqStatus`, DIO1, the antenna switch, then twenty
+round trips for a median and a p95 -- and names the lowest one that failed,
+so that a board which will not come up is a firmware, cable, pin-map, power
+or driver problem and not all five at once. It runs against the reference
+device in the test suite, so the tool is qualified before the boards are.

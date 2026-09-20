@@ -3,19 +3,24 @@
 //! virtual chip on the far side. What the firmware must match is pinned
 //! here; only the wires are not.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::io;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use embedded_hal::spi::Operation;
 use lcq::application::{PhyProfile, Radio, RadioEvent};
 use lcq::infrastructure::hub::{Delivery, Verdict};
-use lcq::infrastructure::sx126x::bridge::device;
+use lcq::infrastructure::rnode::kiss;
 use lcq::infrastructure::sx126x::bridge::protocol::{
-    self, BOARD_VIRTUAL, Hello, OP_READ, OP_TRANSFER, OP_WRITE, STATUS_OK, STATUS_UNKNOWN_COMMAND,
+    self, BOARD_VIRTUAL, EVENT_DIO1, EVENT_ERROR, Hello, OP_READ, OP_TRANSFER, OP_WRITE, REPLY,
+    STATUS_OK, STATUS_UNKNOWN_COMMAND,
 };
-use lcq::infrastructure::sx126x::bridge::{BridgeError, BridgeOptions, BridgeRadio, Link};
+use lcq::infrastructure::sx126x::bridge::{BridgeError, BridgeOptions, BridgeRadio, Link, Port};
+use lcq::infrastructure::sx126x::bridge::{device, diagnostic};
 use lcq::infrastructure::sx126x::{Chip, ChipMode};
 use serial2::SerialPort;
 
@@ -139,16 +144,180 @@ fn operations_encode_as_the_protocol_says() {
 }
 
 #[test]
-fn hello_round_trips() {
+fn hello_round_trips_and_its_version_is_readable_on_its_own() {
     let hello = Hello {
-        protocol: 1,
-        firmware: (0, 1),
+        protocol: protocol::VERSION,
+        firmware: (0, 2),
         board: BOARD_VIRTUAL,
+        session: 0xDEAD_BEEF,
         busy: false,
         dio1: true,
     };
     assert_eq!(Hello::parse(&hello.encode()), Some(hello));
-    assert_eq!(Hello::parse(&[1, 0]), None);
+    // A reply from another version is short, but its version still reads:
+    // that is how a mismatch is told from a truncated reply.
+    assert_eq!(Hello::parse(&[1, 0, 1, 1, 0, 0]), None);
+    assert_eq!(Hello::version(&[1, 0, 1, 1, 0, 0]), Some(1));
+    assert_eq!(Hello::version(&[]), None);
+}
+
+/// A device the test drives: it answers `HELLO` with whatever session is set
+/// on it, ignores everything else, and can be told to push an event.
+struct Fake {
+    session: Arc<AtomicU32>,
+    to_host: Mutex<VecDeque<u8>>,
+}
+
+impl Fake {
+    fn new(session: &Arc<AtomicU32>) -> Arc<Self> {
+        Arc::new(Self {
+            session: Arc::clone(session),
+            to_host: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    fn push(&self, command: u8, payload: &[u8]) {
+        self.to_host
+            .lock()
+            .expect("lock")
+            .extend(kiss::encode(command, payload));
+    }
+}
+
+impl Port for Fake {
+    fn read(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut out = self.to_host.lock().expect("lock");
+        if out.is_empty() {
+            drop(out);
+            thread::sleep(Duration::from_millis(5));
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        let n = out.len().min(buffer.len());
+        for slot in buffer.iter_mut().take(n) {
+            *slot = out.pop_front().expect("byte");
+        }
+        Ok(n)
+    }
+
+    fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut frames = Vec::new();
+        kiss::Deframer::new(1_100).push(bytes, &mut frames);
+        for frame in frames {
+            if frame.first() == Some(&protocol::HELLO) {
+                let hello = Hello {
+                    protocol: protocol::VERSION,
+                    firmware: (0, 2),
+                    board: BOARD_VIRTUAL,
+                    session: self.session.load(Ordering::Acquire),
+                    busy: false,
+                    dio1: false,
+                };
+                self.push(protocol::HELLO | REPLY, &hello.encode());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_notice_that_the_line_has_fallen_is_not_an_interrupt() {
+    let session = Arc::new(AtomicU32::new(1));
+    let fake = Fake::new(&session);
+    let link = Link::open(Arc::clone(&fake) as Arc<dyn Port>).expect("link");
+
+    // The chip withdrew the interrupt before the notice crossed the cable.
+    fake.push(EVENT_DIO1, &[0]);
+    let activity = link.wait(Duration::from_millis(200));
+    assert!(
+        !activity.irq,
+        "a notice carrying a low level must not wake the driver"
+    );
+
+    // One that still says high is a hint worth acting on.
+    fake.push(EVENT_DIO1, &[1]);
+    assert!(link.wait(Duration::from_millis(500)).irq);
+}
+
+#[test]
+fn an_error_event_about_another_command_is_not_this_call_s_answer() {
+    let session = Arc::new(AtomicU32::new(1));
+    let fake = Fake::new(&session);
+    let link = Link::open(Arc::clone(&fake) as Arc<dyn Port>).expect("link");
+    fake.push(EVENT_ERROR, &[STATUS_UNKNOWN_COMMAND, protocol::RF]);
+    // The call is for PINS, which the fake never answers; the error names RF.
+    match link.call(protocol::PINS, &[], Duration::from_millis(300)) {
+        Err(BridgeError::Timeout(protocol::PINS)) => {}
+        other => panic!("expected the stale error to be ignored, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_reply_said_before_the_host_arrived_is_not_its_answer() {
+    let session = Arc::new(AtomicU32::new(0x3333_3333));
+    let fake = Fake::new(&session);
+    let link = Link::open(Arc::clone(&fake) as Arc<dyn Port>).expect("link");
+
+    // A reply to somebody else's question, already on the wire: a host that
+    // died mid-call, or a board talking to nobody.
+    let stale = Hello {
+        protocol: protocol::VERSION,
+        firmware: (0, 2),
+        board: BOARD_VIRTUAL,
+        session: 0x9999_9999,
+        busy: false,
+        dio1: false,
+    };
+    fake.push(protocol::HELLO | REPLY, &stale.encode());
+    thread::sleep(Duration::from_millis(60));
+
+    let hello = link.hello(Duration::from_secs(1)).expect("a hello");
+    assert_eq!(
+        hello.session, 0x3333_3333,
+        "the handshake must answer to this host, not to the last one"
+    );
+}
+
+#[test]
+fn a_device_that_restarted_poisons_the_link_instead_of_carrying_on() {
+    let session = Arc::new(AtomicU32::new(0x1111_1111));
+    let fake = Fake::new(&session);
+    let link = Link::open(Arc::clone(&fake) as Arc<dyn Port>).expect("link");
+    assert_eq!(
+        link.hello(Duration::from_secs(1)).expect("a hello").session,
+        0x1111_1111
+    );
+
+    // The board reboots: it answers HELLO again, with a new session.
+    session.store(0x2222_2222, Ordering::Release);
+
+    // Anything that goes unanswered now asks who is there.
+    match link.dio1_level() {
+        Err(BridgeError::Reset { met, now }) => {
+            assert_eq!((met, now), (0x1111_1111, 0x2222_2222));
+        }
+        other => panic!("expected a reset, got {other:?}"),
+    }
+    assert!(link.poisoned());
+    // And the link stays refused: the chip is not the one the driver set up.
+    assert!(matches!(
+        link.hello(Duration::from_secs(1)),
+        Err(BridgeError::Reset { .. })
+    ));
+}
+
+#[test]
+fn a_device_speaking_another_protocol_version_is_named_as_such() {
+    let session = Arc::new(AtomicU32::new(1));
+    let fake = Fake::new(&session);
+    let link = Link::open(Arc::clone(&fake) as Arc<dyn Port>).expect("link");
+    // A version-1 reply: six bytes, version first.
+    fake.push(protocol::HELLO | REPLY, &[1, 0, 1, BOARD_VIRTUAL, 0, 0]);
+    match link.hello(Duration::from_secs(1)) {
+        Err(BridgeError::Protocol(why)) => {
+            assert!(why.contains("version 1"), "{why}");
+        }
+        other => panic!("expected a version mismatch, got {other:?}"),
+    }
 }
 
 #[test]
@@ -158,6 +327,7 @@ fn the_reference_device_answers_hello_and_refuses_what_it_does_not_know() {
     let hello = link.hello(Duration::from_secs(2)).expect("a hello");
     assert_eq!(hello.protocol, protocol::VERSION);
     assert_eq!(hello.board, BOARD_VIRTUAL);
+    assert_ne!(hello.session, 0, "a device draws a session at every boot");
     assert!(!hello.dio1, "nothing is pending on a fresh chip");
 
     let pins = link
@@ -212,6 +382,49 @@ fn nobody_on_the_far_end_is_a_timeout() {
         other => panic!("expected a timeout, got {other:?}"),
     }
     assert!(started.elapsed() >= Duration::from_millis(400));
+}
+
+#[test]
+fn the_pre_flight_answers_every_step_against_the_reference_device() {
+    let bench = bench();
+    let link = Link::open(bench.host).expect("link");
+    let report = diagnostic::run(&link);
+    for step in &report.steps {
+        println!("  {:<18} {:?} {:?}", step.name, step.took, step.outcome);
+    }
+    assert!(
+        report.passed(),
+        "the pre-flight failed at {:?}",
+        report.first_failure()
+    );
+    let named: Vec<&str> = report.steps.iter().map(|step| step.name).collect();
+    assert_eq!(
+        named,
+        vec![
+            "hello",
+            "reset",
+            "busy low",
+            "get status",
+            "get device errors",
+            "get irq status",
+            "dio1 reads low",
+            "rf switch",
+            "round trip",
+        ]
+    );
+}
+
+#[test]
+fn the_pre_flight_says_which_rung_failed_when_nobody_answers() {
+    let (host, _dev) = pair();
+    let link = Link::open(host).expect("link");
+    let report = diagnostic::run(&link);
+    assert!(!report.passed());
+    assert_eq!(
+        report.first_failure().expect("a failure").name,
+        "hello",
+        "the lowest rung is the one to report"
+    );
 }
 
 #[test]

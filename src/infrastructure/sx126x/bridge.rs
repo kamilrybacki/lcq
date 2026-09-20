@@ -20,7 +20,7 @@
 //!
 //! | Request | Payload | Reply payload |
 //! |---|---|---|
-//! | `0x01` `HELLO` | -- | protocol version, firmware major, minor, board id, BUSY level, DIO1 level; turns DIO1 events on |
+//! | `0x01` `HELLO` | -- | protocol version, firmware major, minor, board id, session id (`u32` little-endian), BUSY level, DIO1 level; turns DIO1 events on |
 //! | `0x02` `RESET` | -- | status, once NRESET has been pulsed and BUSY seen low |
 //! | `0x03` `BUSY` | timeout in ms, `u16` little-endian | status: `0` once BUSY is low, `1` on timeout |
 //! | `0x04` `PINS` | -- | BUSY level, DIO1 level |
@@ -36,9 +36,24 @@
 //! `length` microseconds. Statuses: `0` ok, `1` timeout, `2` bad request,
 //! `3` too long, `4` unknown command.
 //!
-//! Events: `0xE1` DIO1 rose (payload: the level), `0xEE` error (payload:
-//! status, offending command). A rising edge the device latched before the
-//! host asked for events is not reported; the level in the `HELLO` reply is.
+//! Events: `0xE1` DIO1 rose (payload: the level *as the device read it
+//! after the edge*), `0xEE` error (payload: status, offending command). A
+//! rising edge the device latched before the host asked for events is not
+//! reported; the level in the `HELLO` reply is.
+//!
+//! **An event is a hint, never a fact.** A DIO1 notice may cross a USB cable
+//! that is slower than the driver, so by the time it lands the chip's IRQ may
+//! already be cleared. The host therefore drops a notice whose level says the
+//! line has fallen, and confirms every other one by reading the line before
+//! it wakes the driver -- because the driver's preamble path clears the IRQ
+//! status, and a spurious wake there would discard a reception that arrived
+//! in between.
+//!
+//! **The session id says the board is the one the host met.** It is drawn
+//! afresh at every boot. A host that stops hearing replies asks again: a
+//! different id means the microcontroller restarted mid-operation, the chip
+//! is no longer configured, and the link poisons itself rather than carrying
+//! on with a radio that is not listening.
 //!
 //! Board ids: `0x01` XIAO ESP32-S3 + Wio-SX1262 kit, `0xFE` the reference
 //! device on the virtual chip ([`device`]), which is the specification the
@@ -46,7 +61,7 @@
 
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -55,12 +70,13 @@ use std::time::{Duration, Instant};
 use embedded_hal::spi::{ErrorKind, ErrorType, Operation};
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::spi::SpiDevice;
+use lora_modulation::BaseBandModulationParams;
 use lora_phy::mod_params::RadioError as DriverError;
 use lora_phy::mod_traits::InterfaceVariant;
 use lora_phy::sx126x::{Config, Sx126x, Sx1262, TcxoCtrlVoltage};
 
 use super::chip::Activity;
-use super::radio::{DriverHandle, Watch, drive};
+use super::radio::{DriverHandle, Watch, bandwidth, coding_rate, drive, spreading_factor};
 use crate::application::{PhyProfile, Radio, RadioError, RadioEvent};
 use crate::infrastructure::rnode::kiss;
 
@@ -69,9 +85,11 @@ use crate::infrastructure::rnode::kiss;
 const CALL_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long one `HELLO` attempt waits before the next.
 const HELLO_TIMEOUT: Duration = Duration::from_millis(300);
-/// How long the driver may wait for DIO1 after a command: longer than any
-/// frame the chip can send.
-const IRQ_TIMEOUT: Duration = Duration::from_secs(12);
+/// What the bridge, the host and the driver may add to a chip's own timing
+/// before a wait is called a failure.
+const BRIDGE_MARGIN: Duration = Duration::from_secs(1);
+/// The deadline used when a profile's timing cannot be worked out.
+const FALLBACK_IRQ_TIMEOUT: Duration = Duration::from_secs(12);
 /// While waiting for DIO1, how often the level is read in case an edge went
 /// missing.
 const IRQ_SLICE: Duration = Duration::from_millis(100);
@@ -81,14 +99,41 @@ const READ_SLICE: Duration = Duration::from_millis(20);
 const BAUD: u32 = 115_200;
 /// `GetIrqStatus`: a status byte, then the sixteen IRQ bits.
 const OP_GET_IRQ_STATUS: u8 = 0x12;
+/// The chip's data buffer: the longest frame a profile can put on the air.
+const MAX_PAYLOAD_BYTES: u8 = 255;
+
+/// How long the driver may wait on DIO1 before the wait is a failure.
+///
+/// The one place the driver waits on the line is inside `tx()`, for
+/// `TxDone`, so the bound is the time on air of the longest frame this
+/// profile can carry plus what the bridge and the host may add. A fixed
+/// constant would be either too short for a slower profile or too slow to
+/// notice a board that has stopped answering.
+fn irq_timeout(profile: PhyProfile) -> Duration {
+    let (Some(sf), Some(bw), Some(cr)) = (
+        spreading_factor(profile.spreading_factor),
+        bandwidth(profile.bandwidth_hz),
+        coding_rate(profile.coding_rate_denominator),
+    ) else {
+        return FALLBACK_IRQ_TIMEOUT;
+    };
+    let preamble = u8::try_from(profile.preamble_symbols).unwrap_or(u8::MAX);
+    let micros = BaseBandModulationParams::new(sf, bw, cr).time_on_air_us(
+        Some(preamble),
+        profile.explicit_header,
+        MAX_PAYLOAD_BYTES,
+    );
+    Duration::from_micros(u64::from(micros)) + BRIDGE_MARGIN
+}
 
 /// The bytes of the protocol, shared by the adapter, the reference device
 /// and -- by hand -- the firmware.
 pub mod protocol {
     use embedded_hal::spi::Operation;
 
-    /// The protocol version `HELLO` must answer with.
-    pub const VERSION: u8 = 1;
+    /// The protocol version `HELLO` must answer with. Version 2 added the
+    /// session id.
+    pub const VERSION: u8 = 2;
 
     /// Who is there; turns DIO1 events on.
     pub const HELLO: u8 = 0x01;
@@ -229,6 +274,9 @@ pub mod protocol {
         pub firmware: (u8, u8),
         /// Which board it is.
         pub board: u8,
+        /// Drawn afresh every time the device boots: a change means it
+        /// restarted, and nothing the host configured survived.
+        pub session: u32,
         /// BUSY was high.
         pub busy: bool,
         /// DIO1 was high: an IRQ is pending from before the host was here.
@@ -236,14 +284,24 @@ pub mod protocol {
     }
 
     impl Hello {
+        /// The protocol version alone, which every version of the reply
+        /// carries first. Read before [`Hello::parse`], so that a device
+        /// speaking another version is told apart from a truncated reply.
+        #[must_use]
+        pub fn version(body: &[u8]) -> Option<u8> {
+            body.first().copied()
+        }
+
         /// Decode the reply payload; `None` if it is short.
         #[must_use]
         pub fn parse(body: &[u8]) -> Option<Self> {
-            let &[protocol, major, minor, board, busy, dio1] = body.get(..6)?.first_chunk::<6>()?;
+            let &[protocol, major, minor, board, s0, s1, s2, s3, busy, dio1] =
+                body.first_chunk::<10>()?;
             Some(Self {
                 protocol,
                 firmware: (major, minor),
                 board,
+                session: u32::from_le_bytes([s0, s1, s2, s3]),
                 busy: busy != 0,
                 dio1: dio1 != 0,
             })
@@ -251,12 +309,17 @@ pub mod protocol {
 
         /// The reply payload for these values.
         #[must_use]
-        pub fn encode(&self) -> [u8; 6] {
+        pub fn encode(&self) -> [u8; 10] {
+            let [s0, s1, s2, s3] = self.session.to_le_bytes();
             [
                 self.protocol,
                 self.firmware.0,
                 self.firmware.1,
                 self.board,
+                s0,
+                s1,
+                s2,
+                s3,
                 u8::from(self.busy),
                 u8::from(self.dio1),
             ]
@@ -293,6 +356,14 @@ pub enum BridgeError {
     },
     /// The device said something the protocol does not allow.
     Protocol(String),
+    /// The device restarted while the host was using it: everything the
+    /// driver configured is gone, so the link refuses to carry on.
+    Reset {
+        /// The session the host met.
+        met: u32,
+        /// The session answering now.
+        now: u32,
+    },
 }
 
 impl fmt::Display for BridgeError {
@@ -312,6 +383,10 @@ impl fmt::Display for BridgeError {
                 )
             }
             Self::Protocol(what) => write!(f, "protocol: {what}"),
+            Self::Reset { met, now } => write!(
+                f,
+                "the device restarted mid-operation: session {met:#010x} became {now:#010x}"
+            ),
         }
     }
 }
@@ -366,6 +441,10 @@ pub struct Link {
     irq: AtomicBool,
     /// The host asked for attention while a call was in progress.
     woken: AtomicBool,
+    /// The session the device answered `HELLO` with, once it has.
+    session: AtomicU32,
+    /// The device restarted under the host: every later call refuses.
+    poisoned: AtomicBool,
     /// Cleared when the link is dropped, so the reader thread lets go.
     alive: Arc<AtomicBool>,
 }
@@ -392,6 +471,8 @@ impl Link {
             wakes: frames,
             irq: AtomicBool::new(false),
             woken: AtomicBool::new(false),
+            session: AtomicU32::new(0),
+            poisoned: AtomicBool::new(false),
             alive,
         }))
     }
@@ -408,6 +489,7 @@ impl Link {
         payload: &[u8],
         timeout: Duration,
     ) -> Result<Vec<u8>, BridgeError> {
+        self.guard()?;
         self.port
             .write_all(&kiss::encode(command, payload))
             .map_err(BridgeError::Port)?;
@@ -420,12 +502,26 @@ impl Link {
                     Some((&head, body)) if head == command | protocol::REPLY => {
                         return Ok(body.to_vec());
                     }
-                    Some((&protocol::EVENT_DIO1, _)) => self.irq.store(true, Ordering::Release),
+                    Some((&protocol::EVENT_DIO1, level)) => {
+                        // A notice whose level says the line has fallen is
+                        // stale: the driver cleared the IRQ before the cable
+                        // caught up. Latching it would wake the driver into
+                        // the path that clears the status, which would eat
+                        // the next reception.
+                        if level.first().copied().unwrap_or(1) != 0 {
+                            self.irq.store(true, Ordering::Release);
+                        }
+                    }
                     Some((&protocol::EVENT_ERROR, body)) => {
-                        return Err(BridgeError::Device {
-                            command,
-                            code: body.first().copied().unwrap_or(0),
-                        });
+                        // The event names what it is about. One about
+                        // something else is stale, not this call's answer.
+                        let offending = body.get(1).copied().unwrap_or(command);
+                        if offending == command {
+                            return Err(BridgeError::Device {
+                                command,
+                                code: body.first().copied().unwrap_or(0),
+                            });
+                        }
                     }
                     // A reply to something else: stale, from before the port
                     // was opened. Nothing waits for it.
@@ -440,9 +536,79 @@ impl Link {
         }
     }
 
+    /// Throw away whatever the device has already said.
+    fn drain(&self) {
+        let inbox = self.inbox.lock().unwrap_or_else(PoisonError::into_inner);
+        while inbox.try_recv().is_ok() {}
+    }
+
+    /// Refuse to speak to a device that restarted under us.
+    fn guard(&self) -> Result<(), BridgeError> {
+        if self.poisoned.load(Ordering::Acquire) {
+            let met = self.session.load(Ordering::Acquire);
+            return Err(BridgeError::Reset { met, now: met });
+        }
+        Ok(())
+    }
+
+    /// A call that treats silence as a question: if nothing answered, ask the
+    /// device who it is. A different session means it rebooted, and the chip
+    /// it left behind is not the one the driver configured -- so the link
+    /// poisons itself and every later call fails, rather than transmitting
+    /// into a radio that is no longer listening.
+    ///
+    /// # Errors
+    ///
+    /// [`BridgeError::Reset`] once the device has restarted; otherwise
+    /// whatever the call itself produced.
+    pub fn call_checked(
+        &self,
+        command: u8,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, BridgeError> {
+        match self.call(command, payload, timeout) {
+            Err(BridgeError::Timeout(command)) => {
+                self.verify_session()?;
+                Err(BridgeError::Timeout(command))
+            }
+            other => other,
+        }
+    }
+
+    /// Ask the device who it is and compare it with who it was. Poisons the
+    /// link if the answer changed.
+    ///
+    /// # Errors
+    ///
+    /// [`BridgeError::Reset`] if the session changed; the call's own error if
+    /// the device did not answer at all.
+    pub fn verify_session(&self) -> Result<(), BridgeError> {
+        self.guard()?;
+        let met = self.session.load(Ordering::Acquire);
+        let body = self.call(protocol::HELLO, &[], HELLO_TIMEOUT)?;
+        let Some(hello) = Hello::parse(&body) else {
+            return Err(BridgeError::Protocol("short HELLO reply".into()));
+        };
+        if hello.session == met {
+            return Ok(());
+        }
+        self.poisoned.store(true, Ordering::Release);
+        Err(BridgeError::Reset {
+            met,
+            now: hello.session,
+        })
+    }
+
+    /// Whether the device has restarted under the host.
+    #[must_use]
+    pub fn poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
     /// A request whose reply is a status byte.
     fn expect_ok(&self, command: u8, payload: &[u8], timeout: Duration) -> Result<(), BridgeError> {
-        match self.call(command, payload, timeout)?.first() {
+        match self.call_checked(command, payload, timeout)?.first() {
             Some(&protocol::STATUS_OK) => Ok(()),
             Some(&status) => Err(BridgeError::Status { command, status }),
             None => Err(BridgeError::Protocol(format!(
@@ -459,12 +625,26 @@ impl Link {
     /// [`BridgeError::Timeout`] once patience runs out; the rest as
     /// [`BridgeError`].
     pub fn hello(&self, patience: Duration) -> Result<Hello, BridgeError> {
+        // Anything already on the wire was said to somebody else: a host
+        // that died mid-call, or a board that has been talking to nobody.
+        // A stale reply must not be mistaken for the answer to the first
+        // question this host asks.
+        self.drain();
         let deadline = Instant::now() + patience;
         loop {
             match self.call(protocol::HELLO, &[], HELLO_TIMEOUT) {
                 Ok(body) => {
+                    let version = Hello::version(&body)
+                        .ok_or_else(|| BridgeError::Protocol("empty HELLO reply".into()))?;
+                    if version != protocol::VERSION {
+                        return Err(BridgeError::Protocol(format!(
+                            "the device speaks protocol version {version}, this adapter version {}",
+                            protocol::VERSION
+                        )));
+                    }
                     let hello = Hello::parse(&body)
                         .ok_or_else(|| BridgeError::Protocol("short HELLO reply".into()))?;
+                    self.session.store(hello.session, Ordering::Release);
                     if hello.dio1 {
                         self.irq.store(true, Ordering::Release);
                     }
@@ -482,7 +662,7 @@ impl Link {
     ///
     /// See [`BridgeError`].
     pub fn dio1_level(&self) -> Result<bool, BridgeError> {
-        let body = self.call(protocol::PINS, &[], CALL_TIMEOUT)?;
+        let body = self.call_checked(protocol::PINS, &[], CALL_TIMEOUT)?;
         body.get(1)
             .map(|&level| level != 0)
             .ok_or_else(|| BridgeError::Protocol("short PINS reply".into()))
@@ -505,7 +685,11 @@ impl Link {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match inbox.recv_timeout(remaining) {
                 Ok(Inbound::Frame(frame)) => {
-                    if frame.first() == Some(&protocol::EVENT_DIO1) {
+                    // As in `call`: a notice that says the line has fallen
+                    // is a stale hint, not an interrupt.
+                    if let Some((&protocol::EVENT_DIO1, level)) = frame.split_first()
+                        && level.first().copied().unwrap_or(1) != 0
+                    {
                         return Activity {
                             irq: true,
                             host: false,
@@ -605,7 +789,7 @@ impl SpiDevice for BridgeSpi {
         let payload = protocol::encode_operations(operations);
         let reply = self
             .link
-            .call(protocol::SPI, &payload, CALL_TIMEOUT)
+            .call_checked(protocol::SPI, &payload, CALL_TIMEOUT)
             .map_err(BridgeSpiError)?;
         let Some((&status, mut bytes)) = reply.split_first() else {
             return Err(BridgeSpiError(BridgeError::Protocol(
@@ -644,6 +828,8 @@ impl SpiDevice for BridgeSpi {
 /// The driver's control lines: reset, BUSY, DIO1 and the antenna switch.
 pub struct BridgeIv {
     link: Arc<Link>,
+    /// How long `TxDone` may take on this profile.
+    irq_timeout: Duration,
 }
 
 #[allow(unknown_lints, clippy::unused_async_trait_impl)]
@@ -665,20 +851,23 @@ impl InterfaceVariant for BridgeIv {
     }
 
     async fn await_irq(&mut self) -> Result<(), DriverError> {
-        // The driver waits here for `TxDone`. Edges arrive as events; the
-        // level is read every slice in case one went missing, and a wake
-        // from the host is kept for the next wait rather than cutting the
-        // transmission short.
-        let deadline = Instant::now() + IRQ_TIMEOUT;
+        // The driver waits here for `TxDone`. A notice only ends the wait
+        // early; the line itself decides, because a notice can cross the
+        // cable after the chip has moved on. A wake from the host is kept
+        // for the next wait rather than cutting the transmission short.
+        let deadline = Instant::now() + self.irq_timeout;
         let mut host_wanted = false;
         loop {
-            let activity = self.link.wait(IRQ_SLICE);
-            host_wanted |= activity.host;
-            if activity.irq || self.link.dio1_level().unwrap_or(false) {
-                if host_wanted {
-                    self.link.woken.store(true, Ordering::Release);
+            host_wanted |= self.link.wait(IRQ_SLICE).host;
+            match self.link.dio1_level() {
+                Ok(true) => {
+                    if host_wanted {
+                        self.link.wake();
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                Ok(false) => {}
+                Err(_) => return Err(DriverError::DIO1),
             }
             if Instant::now() >= deadline {
                 return Err(DriverError::Irq);
@@ -708,20 +897,28 @@ impl InterfaceVariant for BridgeIv {
 /// What the driver thread waits on: DIO1 events, and the host.
 pub struct BridgeWatch {
     link: Arc<Link>,
+    /// Where a restart is reported, once.
+    events: Sender<RadioEvent>,
+    /// Whether that report has been made.
+    announced: AtomicBool,
 }
 
 impl Watch for BridgeWatch {
     fn wait_for_activity(&self, timeout: Duration) -> Activity {
-        let activity = self.link.wait(timeout);
-        if activity.irq || activity.host {
-            return activity;
+        let host = self.link.wait(timeout).host;
+        // A notice only ends the wait early. Whether one arrived or the wait
+        // timed out, the line is what decides: the driver's preamble path
+        // clears the chip's IRQ status, so waking it on a notice that the
+        // chip has already withdrawn would discard the reception that
+        // arrived in between.
+        let irq = self.link.dio1_level().unwrap_or(false);
+        if self.link.poisoned() && !self.announced.swap(true, Ordering::AcqRel) {
+            let _ = self.events.send(RadioEvent::Note(
+                "\"event\":\"bridge_reset\",\"why\":\"the device restarted; this radio is offline\""
+                    .to_string(),
+            ));
         }
-        // Quiet for a whole wait: read the level, in case an edge went
-        // missing while events were off.
-        Activity {
-            irq: self.link.dio1_level().unwrap_or(false),
-            host: false,
-        }
+        Activity { irq, host }
     }
 
     fn wake_host(&self) {
@@ -798,19 +995,13 @@ impl BridgeRadio {
     ) -> Result<Self, BridgeError> {
         let link = Link::open(port)?;
         let hello = link.hello(options.patience)?;
-        if hello.protocol != protocol::VERSION {
-            return Err(BridgeError::Protocol(format!(
-                "the device speaks protocol version {}, this adapter version {}",
-                hello.protocol,
-                protocol::VERSION
-            )));
-        }
         let kind = Sx126x::new(
             BridgeSpi {
                 link: Arc::clone(&link),
             },
             BridgeIv {
                 link: Arc::clone(&link),
+                irq_timeout: irq_timeout(profile),
             },
             Config {
                 chip: Sx1262,
@@ -822,10 +1013,14 @@ impl BridgeRadio {
         let (commands, inbox) = channel();
         let (events_in, events) = channel::<RadioEvent>();
         let _ = events_in.send(RadioEvent::Note(format!(
-            "\"event\":\"bridge_up\",\"firmware\":\"{}.{}\",\"board\":{}",
-            hello.firmware.0, hello.firmware.1, hello.board
+            "\"event\":\"bridge_up\",\"protocol\":{},\"firmware\":\"{}.{}\",\"board\":{},\"session\":\"{:#010x}\"",
+            hello.protocol, hello.firmware.0, hello.firmware.1, hello.board, hello.session
         )));
-        let watch: Arc<dyn Watch> = Arc::new(BridgeWatch { link });
+        let watch: Arc<dyn Watch> = Arc::new(BridgeWatch {
+            link,
+            events: events_in.clone(),
+            announced: AtomicBool::new(false),
+        });
         let handle = DriverHandle::new(commands, events, watch);
         let watch = handle.watch();
         thread::Builder::new()
@@ -840,6 +1035,19 @@ impl BridgeRadio {
     pub const fn hello(&self) -> &Hello {
         &self.hello
     }
+}
+
+/// Open a serial port for the bridge: the device ignores the rate, but the
+/// read timeout decides how promptly the reader thread notices a frame.
+///
+/// # Errors
+///
+/// The port's own.
+#[cfg(feature = "hardware")]
+pub fn serial_port(path: &str) -> io::Result<serial2::SerialPort> {
+    let mut port = serial2::SerialPort::open(path, BAUD)?;
+    port.set_read_timeout(READ_SLICE)?;
+    Ok(port)
 }
 
 #[cfg(feature = "hardware")]
@@ -871,6 +1079,256 @@ impl Radio for BridgeRadio {
     }
 }
 
+/// The pre-flight: what the bridge can be asked before a protocol is put on
+/// top of it.
+///
+/// When a board refuses to come up, `chip_failed` alone cannot say whether
+/// the fault is the firmware, the USB link, the pin map, the module or the
+/// driver. These steps separate them, in the order that each one depends on
+/// the last, and they run against the reference device as readily as against
+/// a board -- so the tool itself is tested before it meets hardware.
+pub mod diagnostic {
+    use std::time::{Duration, Instant};
+
+    use embedded_hal::spi::Operation;
+
+    use super::{CALL_TIMEOUT, Link, protocol};
+
+    /// How many times a probe is repeated to say something about its spread.
+    const PROBE_ROUNDS: usize = 20;
+    /// `GetStatus`.
+    const OP_GET_STATUS: u8 = 0xC0;
+    /// `GetDeviceErrors`: a status byte, then the sixteen error bits.
+    const OP_GET_DEVICE_ERRORS: u8 = 0x17;
+    /// `GetIrqStatus`: a status byte, then the sixteen IRQ bits.
+    const OP_GET_IRQ_STATUS: u8 = 0x12;
+
+    /// One step: what it asked, what came back, and how long it took.
+    #[derive(Debug, Clone)]
+    pub struct Step {
+        /// What was asked.
+        pub name: &'static str,
+        /// What came back, or why nothing did.
+        pub outcome: Result<String, String>,
+        /// How long the step took.
+        pub took: Duration,
+    }
+
+    impl Step {
+        /// Whether this step answered.
+        #[must_use]
+        pub const fn passed(&self) -> bool {
+            self.outcome.is_ok()
+        }
+    }
+
+    /// Every step, in the order they ran.
+    #[derive(Debug, Clone)]
+    pub struct Report {
+        /// The steps.
+        pub steps: Vec<Step>,
+    }
+
+    impl Report {
+        /// Whether every step answered.
+        #[must_use]
+        pub fn passed(&self) -> bool {
+            self.steps.iter().all(Step::passed)
+        }
+
+        /// The first step that did not, if any.
+        #[must_use]
+        pub fn first_failure(&self) -> Option<&Step> {
+            self.steps.iter().find(|step| !step.passed())
+        }
+    }
+
+    fn step(name: &'static str, body: impl FnOnce() -> Result<String, String>) -> Step {
+        let started = Instant::now();
+        let outcome = body();
+        Step {
+            name,
+            outcome,
+            took: started.elapsed(),
+        }
+    }
+
+    /// One SPI command with a fixed-length answer, through the bridge.
+    fn spi(link: &Link, opcode: u8, reads: usize) -> Result<Vec<u8>, String> {
+        let mut answer = vec![0u8; reads];
+        let ops = [
+            Operation::Write(&[opcode]),
+            Operation::Read(&mut answer[..]),
+        ];
+        let payload = protocol::encode_operations(&ops);
+        let reply = link
+            .call_checked(protocol::SPI, &payload, CALL_TIMEOUT)
+            .map_err(|error| error.to_string())?;
+        match reply.split_first() {
+            Some((&protocol::STATUS_OK, bytes)) => Ok(bytes.to_vec()),
+            Some((&status, _)) => Err(format!(
+                "the device refused the transaction: status {status}"
+            )),
+            None => Err("empty reply".to_string()),
+        }
+    }
+
+    /// Run the pre-flight. Every step is attempted; a failure does not stop
+    /// the rest, because the later answers say which layer the first one
+    /// belongs to.
+    #[must_use]
+    pub fn run(link: &Link) -> Report {
+        let mut steps = speaks(link);
+        steps.extend(answers(link));
+        steps.extend(switches(link));
+        Report { steps }
+    }
+
+    /// Is anything there, and does the chip come out of reset: the cable and
+    /// the firmware, before any SPI command means anything.
+    fn speaks(link: &Link) -> Vec<Step> {
+        let mut steps = Vec::new();
+
+        steps.push(step("hello", || {
+            let hello = link
+                .hello(Duration::from_secs(2))
+                .map_err(|error| error.to_string())?;
+            Ok(format!(
+                "protocol {}, firmware {}.{}, board {:#04x}, session {:#010x}, BUSY {}, DIO1 {}",
+                hello.protocol,
+                hello.firmware.0,
+                hello.firmware.1,
+                hello.board,
+                hello.session,
+                u8::from(hello.busy),
+                u8::from(hello.dio1),
+            ))
+        }));
+
+        steps.push(step("reset", || {
+            link.call_checked(protocol::RESET, &[], CALL_TIMEOUT)
+                .map_err(|error| error.to_string())
+                .and_then(|body| match body.first() {
+                    Some(&protocol::STATUS_OK) => Ok("NRESET pulsed, BUSY low".to_string()),
+                    Some(&status) => Err(format!("status {status}")),
+                    None => Err("empty reply".to_string()),
+                })
+        }));
+
+        steps.push(step("busy low", || {
+            link.call_checked(
+                protocol::BUSY,
+                &protocol::BUSY_LIMIT_MS.to_le_bytes(),
+                CALL_TIMEOUT,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|body| match body.first() {
+                Some(&protocol::STATUS_OK) => Ok("the chip is ready for a command".to_string()),
+                Some(&protocol::STATUS_TIMEOUT) => {
+                    Err("BUSY stayed high: the module may be unpowered or unseated".to_string())
+                }
+                Some(&status) => Err(format!("status {status}")),
+                None => Err("empty reply".to_string()),
+            })
+        }));
+
+        steps
+    }
+
+    /// Does the chip answer for itself: SPI, the pin map, and what the chip
+    /// says about its own health.
+    fn answers(link: &Link) -> Vec<Step> {
+        let mut steps = Vec::new();
+
+        steps.push(step("get status", || {
+            let bytes = spi(link, OP_GET_STATUS, 1)?;
+            let status = bytes.first().copied().unwrap_or(0);
+            // DS.SX1261-2 13.5.1: chip mode in bits 6:4, command status in 3:1.
+            Ok(format!(
+                "{status:#04x}: mode {:#x}, command status {:#x}",
+                (status >> 4) & 0x7,
+                (status >> 1) & 0x7
+            ))
+        }));
+
+        steps.push(step("get device errors", || {
+            let bytes = spi(link, OP_GET_DEVICE_ERRORS, 3)?;
+            match bytes.as_slice() {
+                [_, high, low] => {
+                    let errors = u16::from_be_bytes([*high, *low]);
+                    if errors == 0 {
+                        Ok("none".to_string())
+                    } else {
+                        Err(format!("{errors:#06x}: the chip reports a fault"))
+                    }
+                }
+                _ => Err("short reply".to_string()),
+            }
+        }));
+
+        steps.push(step("get irq status", || {
+            let bytes = spi(link, OP_GET_IRQ_STATUS, 3)?;
+            match bytes.as_slice() {
+                [_, high, low] => Ok(format!("{:#06x}", u16::from_be_bytes([*high, *low]))),
+                _ => Err("short reply".to_string()),
+            }
+        }));
+
+        steps.push(step("dio1 reads low", || {
+            if link.dio1_level().map_err(|error| error.to_string())? {
+                Err(
+                    "DIO1 is high with no IRQ set: the line may be misassigned or stuck"
+                        .to_string(),
+                )
+            } else {
+                Ok("no interrupt pending".to_string())
+            }
+        }));
+
+        steps
+    }
+
+    /// The board around the chip, and what the cable costs.
+    fn switches(link: &Link) -> Vec<Step> {
+        let mut steps = Vec::new();
+
+        steps.push(step("rf switch", || {
+            for (name, mode) in [
+                ("receive", protocol::RF_RX),
+                ("transmit", protocol::RF_TX),
+                ("off", protocol::RF_OFF),
+            ] {
+                let body = link
+                    .call_checked(protocol::RF, &[mode], CALL_TIMEOUT)
+                    .map_err(|error| format!("{name}: {error}"))?;
+                if body.first() != Some(&protocol::STATUS_OK) {
+                    return Err(format!("{name}: status {:?}", body.first()));
+                }
+            }
+            Ok("receive, transmit and off all accepted".to_string())
+        }));
+
+        steps.push(step("round trip", || {
+            let mut took = Vec::with_capacity(PROBE_ROUNDS);
+            for _ in 0..PROBE_ROUNDS {
+                let started = Instant::now();
+                spi(link, OP_GET_STATUS, 1)?;
+                took.push(started.elapsed());
+            }
+            took.sort_unstable();
+            let at = |percent: usize| took[(took.len() * percent / 100).min(took.len() - 1)];
+            Ok(format!(
+                "{PROBE_ROUNDS} status reads: median {:?}, p95 {:?}, max {:?}",
+                at(50),
+                at(95),
+                took[took.len() - 1]
+            ))
+        }));
+
+        steps
+    }
+}
+
 /// The device side of the protocol, on the virtual chip.
 ///
 /// This is the reference the firmware mirrors: the same requests, the same
@@ -889,13 +1347,27 @@ pub mod device {
     use crate::infrastructure::sx126x::Chip;
 
     /// Firmware version the reference device reports.
-    pub const FIRMWARE: (u8, u8) = (0, 1);
+    pub const FIRMWARE: (u8, u8) = (0, 2);
     /// How often the edge thread looks at the chip.
     const EDGE_SLICE: Duration = Duration::from_millis(20);
+
+    /// A session id from the host's entropy, never zero: a board draws one
+    /// at every boot, so that a host can tell a restart from silence.
+    fn session_id() -> u32 {
+        use std::hash::{BuildHasher, Hasher};
+        let drawn = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        #[allow(clippy::cast_possible_truncation)]
+        let drawn = drawn as u32;
+        drawn | 1
+    }
 
     struct Device {
         port: Arc<dyn Port>,
         chip: Chip,
+        /// Drawn once per served chip, as a board draws one per boot.
+        session: u32,
         events_on: AtomicBool,
         /// The pending IRQ has been announced; announce the next one only
         /// after DIO1 has fallen.
@@ -914,6 +1386,7 @@ pub mod device {
         let device = Arc::new(Device {
             port,
             chip,
+            session: session_id(),
             events_on: AtomicBool::new(false),
             reported: AtomicBool::new(false),
             alive: AtomicBool::new(true),
@@ -975,7 +1448,9 @@ pub mod device {
                     if self.events_on.load(Ordering::Acquire)
                         && !self.reported.swap(true, Ordering::AcqRel)
                     {
-                        self.send(protocol::EVENT_DIO1, &[1]);
+                        // The level as it reads now, which the host uses to
+                        // drop a notice the chip has already withdrawn.
+                        self.send(protocol::EVENT_DIO1, &[u8::from(self.chip.irq_pending())]);
                     }
                     // The chip's wait returns at once while the IRQ stands;
                     // give the host time to service it.
@@ -992,13 +1467,18 @@ pub mod device {
             };
             match command {
                 protocol::HELLO => {
-                    let pending = self.chip.irq_pending();
+                    // Clear first, read second: an edge between the two is
+                    // then reported as an event rather than lost, which is
+                    // the ordering the firmware must also use.
                     self.events_on.store(true, Ordering::Release);
+                    self.reported.store(false, Ordering::Release);
+                    let pending = self.chip.irq_pending();
                     self.reported.store(pending, Ordering::Release);
                     let hello = Hello {
                         protocol: protocol::VERSION,
                         firmware: FIRMWARE,
                         board: protocol::BOARD_VIRTUAL,
+                        session: self.session,
                         busy: false,
                         dio1: pending,
                     };
@@ -1033,6 +1513,7 @@ pub mod device {
                 protocol::EVENTS => {
                     if let [on] = payload {
                         self.events_on.store(*on != 0, Ordering::Release);
+                        self.reported.store(false, Ordering::Release);
                         let pending = self.chip.irq_pending();
                         self.reported.store(pending, Ordering::Release);
                         self.send(protocol::EVENTS | protocol::REPLY, &[u8::from(pending)]);

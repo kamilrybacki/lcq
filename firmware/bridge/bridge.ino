@@ -12,6 +12,7 @@
 // never names a pin. Build and flash: README.md next to this file.
 
 #include <SPI.h>
+#include <esp_random.h>
 
 #include "board.h"
 
@@ -20,9 +21,10 @@ namespace {
 // Well under the SX126x's 16 MHz ceiling.
 constexpr uint32_t SPI_HZ = 2000000;
 
-constexpr uint8_t PROTOCOL_VERSION = 1;
+// Version 2 added the session id to the HELLO reply.
+constexpr uint8_t PROTOCOL_VERSION = 2;
 constexpr uint8_t FIRMWARE_MAJOR = 0;
-constexpr uint8_t FIRMWARE_MINOR = 1;
+constexpr uint8_t FIRMWARE_MINOR = 2;
 
 // KISS framing: FEND delimits a frame; FEND and FESC inside it are escaped.
 constexpr uint8_t FEND = 0xC0;
@@ -79,6 +81,11 @@ uint8_t encoded[2 * FRAME_LIMIT + 4];
 // The board's pins, copied once in setup().
 RadioPins pins;
 
+// Drawn once at boot and never again: the host compares it to tell a board
+// that restarted mid-operation from one that has merely gone quiet. Never
+// zero, so that "no session yet" stays distinguishable on the host.
+uint32_t session = 0;
+
 volatile bool dio1_rose = false;
 bool events_on = false;
 
@@ -123,16 +130,23 @@ bool wait_busy_low(uint32_t limit_ms) {
 }
 
 void handle_hello() {
-  uint8_t body[6] = {PROTOCOL_VERSION,
-                     FIRMWARE_MAJOR,
-                     FIRMWARE_MINOR,
-                     board().id(),
-                     (uint8_t)digitalRead(pins.busy),
-                     (uint8_t)digitalRead(pins.dio1)};
-  // The level in the reply says whether an IRQ is already pending, so an
-  // edge latched before the host was listening is not reported twice.
+  // Clear the latch first and read the line second. An edge arriving between
+  // the two is then still latched and reported as an event; the other order
+  // would read it into the reply and then throw the latch away, losing it.
   events_on = true;
   dio1_rose = false;
+  uint8_t busy = (uint8_t)digitalRead(pins.busy);
+  uint8_t level = (uint8_t)digitalRead(pins.dio1);
+  uint8_t body[10] = {PROTOCOL_VERSION,
+                      FIRMWARE_MAJOR,
+                      FIRMWARE_MINOR,
+                      board().id(),
+                      (uint8_t)(session & 0xFF),
+                      (uint8_t)((session >> 8) & 0xFF),
+                      (uint8_t)((session >> 16) & 0xFF),
+                      (uint8_t)((session >> 24) & 0xFF),
+                      busy,
+                      level};
   send_frame(CMD_HELLO | REPLY, body, sizeof body);
 }
 
@@ -175,6 +189,7 @@ void handle_events(const uint8_t* p, size_t len) {
     reply_status(CMD_EVENTS, STATUS_BAD_REQUEST);
     return;
   }
+  // Clear before reading, as in handle_hello().
   events_on = p[0] != 0;
   dio1_rose = false;
   uint8_t level = digitalRead(pins.dio1);
@@ -311,6 +326,10 @@ void feed(uint8_t byte) {
 }  // namespace
 
 void setup() {
+  // esp_random() is a true random source once the RF subsystem is up; at
+  // this point it is seeded well enough for an identifier, and the low bit
+  // is forced so that the value is never zero.
+  session = esp_random() | 1u;
   board().begin();
   pins = board().pins();
   attachInterrupt(digitalPinToInterrupt(pins.dio1), on_dio1, RISING);
