@@ -102,6 +102,26 @@ five** (the whole budget; safety holds). Plus the wire tests: tamper every
 field, wrong key, wrong sequence, wrong group key, flipped bit, truncated
 frame, altered header, cross-member nonce, a frame signed over another case.
 
+## 6a. How this compares to open consensus
+
+`ATTACK-ANALOGUES.md` works through the attacks studied on blockchains and
+which of them reach a known-membership protocol. Two results from it belong
+here rather than only there.
+
+**The economics that make a blockchain's majority attack cheap do not apply.**
+Budish's result is that permissionless consensus pays an attacker exactly as
+it pays an honest participant, because holding the majority *is* the
+qualification, so the net cost of attack can be zero. Nothing here pays
+participants, so nothing here can reimburse an attacker for pretending to be
+one, and no amount of money buys a seat. The cost of capture is the cost of
+compromising specific devices and their keys.
+
+**Which makes F21 the cheapest way in, by a wide margin.** Forcing a verdict
+against an honest fleet takes 70 % of its members and more where the fleet is
+small. Rewriting the manifest takes one key. That asymmetry is the finding,
+and it is an argument for hardware-backed pinning rather than for more quorum
+arithmetic.
+
 ## 7. What to do next, in order
 
 Both reviews land on the same order.
